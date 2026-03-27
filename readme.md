@@ -87,16 +87,4 @@ Conventions:
 - Annualization uses 252 trading days.
 - Drawdown recovery only when prior peak is reached or exceeded.
 
-## Current Status
-
-- Implemented: [data_loader.py](data_loader.py).
-- Notebook checks added and executed: [main.ipynb](main.ipynb) fuzzy tests for all current loader functions.
-
-## Suggested Build Order
-
-1. Implement `letf_engine.py` with strict unit handling.
-2. Implement `montecarlo.py` with both methods and fixed output contract.
-3. Implement `portfolio_sim.py` iterative engine with mandatory rebalance sequence.
-4. Implement `metrics.py` with pathwise calculations and summary stats.
-5. Implement `visuals.py` and integrate final flow in [main.ipynb](main.ipynb).
-
+## Resources 
