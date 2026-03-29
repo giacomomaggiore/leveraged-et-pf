@@ -87,4 +87,4 @@ Conventions:
 - Annualization uses 252 trading days.
 - Drawdown recovery only when prior peak is reached or exceeded.
 
-## Resources 
+ 
