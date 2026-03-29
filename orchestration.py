@@ -12,7 +12,8 @@ from metrics import MetricsResult, evaluate_metrics_from_simulation_result
 from montecarlo import simulate_monte_carlo
 from portfolio_sim import SimulationResult, simulate_portfolio_paths
 
-
+#dataclass definition
+#datafrozen = readonly after creation
 @dataclass(frozen=True)
 class MarketDataConfig:
     """Inputs required to fetch and align historical market data."""
@@ -32,9 +33,16 @@ class SpotAssetConfig:
     kind: Literal["spot_etf"] = "spot_etf"
 
 
+#to define synthetic leveraged etf, you need to specify:
+# ticker
+# daily leverage ratio 
+# spread 
+# ter
+# the id can be chosen freely as you like (also Banana ETF works)
 @dataclass(frozen=True)
 class SyntheticLETFAssetConfig:
     """A synthetic LETF built from underlying returns and financing costs."""
+
 
     id: str
     underlying_ticker: str
@@ -78,6 +86,8 @@ class SimulationConfig:
     assets: list[AssetConfig]
     portfolio: PortfolioConfig
     monte_carlo: MonteCarloConfig
+    # portfolio is considered ruined if wealth falls below this fraction 
+    # of initial capital at any point in the path
     metrics_ruin_threshold_fraction: float = 0.10
     use_mean_risk_free_for_metrics: bool = True
 
@@ -94,18 +104,22 @@ class CompleteSimulationResult:
 
 
 def _validate_assets(assets: list[AssetConfig]) -> None:
+    # Guard against an invalid simulation setup with no assets at all.
     if not assets:
         raise ValueError("assets cannot be empty.")
 
+    # Every asset id is used as a unique key later, so duplicates are not allowed.
     ids = [a.id for a in assets]
     if len(ids) != len(set(ids)):
         raise ValueError("Each asset id must be unique.")
 
 
 def _validate_target_weights(target_weights: Mapping[str, float], valid_asset_ids: set[str]) -> None:
+    # Portfolio allocation must be explicitly provided.
     if not target_weights:
         raise ValueError("portfolio.target_weights cannot be empty.")
 
+    # Ensure weights only reference assets that actually exist in config.assets.
     missing = set(target_weights.keys()) - valid_asset_ids
     if missing:
         missing_str = ", ".join(sorted(missing))
@@ -114,15 +128,21 @@ def _validate_target_weights(target_weights: Mapping[str, float], valid_asset_id
 
 def _build_historical_asset_returns(config: SimulationConfig) -> tuple[pd.DataFrame, pd.Series]:
     """Create the historical return panel used as Monte Carlo input."""
+    #  validate that asset definitions are structurally sound.
     _validate_assets(config.assets)
 
+    # Collect only the base market tickers needed to build all configured assets.
     base_tickers: set[str] = set()
+    
+    # insert in base_tickers the tickers of all spot assets 
+    # and the underlying tickers of all synthetic LETF assets
     for asset in config.assets:
         if isinstance(asset, SpotAssetConfig):
             base_tickers.add(asset.ticker)
         elif isinstance(asset, SyntheticLETFAssetConfig):
             base_tickers.add(asset.underlying_ticker)
 
+    
     base_returns, daily_rate = load_market_data(
         tickers=sorted(base_tickers),
         fred_series=config.market.fred_series,
@@ -143,6 +163,7 @@ def _build_historical_asset_returns(config: SimulationConfig) -> tuple[pd.DataFr
     base_returns = base_returns.loc[overlap_mask]
     daily_rate = daily_rate.loc[overlap_mask]
 
+    # Remove invalid rows so downstream simulations receive clean numeric data.
     base_returns = base_returns.replace([np.inf, -np.inf], np.nan).dropna(how="any")
     daily_rate = daily_rate.reindex(base_returns.index).ffill()
 
@@ -152,6 +173,7 @@ def _build_historical_asset_returns(config: SimulationConfig) -> tuple[pd.DataFr
             "Use a different rate series or a later start date."
         )
 
+
     asset_return_series: dict[str, pd.Series] = {}
     for asset in config.assets:
         if isinstance(asset, SpotAssetConfig):
@@ -160,6 +182,7 @@ def _build_historical_asset_returns(config: SimulationConfig) -> tuple[pd.DataFr
             s = base_returns[asset.ticker].copy()
             s.name = asset.id
             asset_return_series[asset.id] = s
+            # is spot etf= skip the following logic and goes to the second one
             continue
 
         if asset.underlying_ticker not in base_returns.columns:
@@ -167,7 +190,9 @@ def _build_historical_asset_returns(config: SimulationConfig) -> tuple[pd.DataFr
                 f"Missing returns for LETF underlying ticker '{asset.underlying_ticker}'."
             )
 
+        # Build synthetic LETF returns from underlying returns and financing costs.
         letf_returns = synthetic_letf_daily_returns(
+            #call leveraged etf function to compute the daily leverage returns 
             underlying_returns=base_returns[asset.underlying_ticker],
             leverage=asset.leverage,
             ter=asset.ter,
@@ -178,9 +203,14 @@ def _build_historical_asset_returns(config: SimulationConfig) -> tuple[pd.DataFr
         letf_returns.name = asset.id
         asset_return_series[asset.id] = letf_returns
 
+
+    #build historical returns asset with both spot and synthetic etf returns
     historical_asset_returns = pd.concat(asset_return_series.values(), axis=1)
+    # Final cleanup in case synthetic series introduced any non-finite values.
     historical_asset_returns = historical_asset_returns.replace([np.inf, -np.inf], np.nan).dropna(how="any")
 
+
+    #check! 
     if historical_asset_returns.empty:
         raise ValueError("No aligned historical returns available for selected assets.")
 
@@ -196,11 +226,14 @@ def run_complete_simulation(config: SimulationConfig) -> CompleteSimulationResul
 
     This is the one-call orchestration API intended for main.ipynb usage.
     """
+    # Validate that portfolio weights reference known assets.
     asset_ids = {asset.id for asset in config.assets}
     _validate_target_weights(config.portfolio.target_weights, valid_asset_ids=asset_ids)
 
+    # Build the clean historical dataset used as input for path generation.
     historical_asset_returns, daily_rate = _build_historical_asset_returns(config)
 
+    # Generate simulated daily asset returns across all paths and horizon days.
     simulated = simulate_monte_carlo(
         historical_returns=historical_asset_returns,
         n_paths=config.monte_carlo.n_paths,
@@ -211,12 +244,14 @@ def run_complete_simulation(config: SimulationConfig) -> CompleteSimulationResul
         seed=config.monte_carlo.seed,
     )
 
+    # Reorder weights to match the exact column order expected by the simulator.
     ordered_weights = {
         col: float(config.portfolio.target_weights[col])
         for col in historical_asset_returns.columns
         if col in config.portfolio.target_weights
     }
 
+    # Simulate the portfolio path, including rebalancing and optional tax drag.
     portfolio_result = simulate_portfolio_paths(
         simulated_returns=simulated,
         target_weights=ordered_weights,
@@ -228,16 +263,20 @@ def run_complete_simulation(config: SimulationConfig) -> CompleteSimulationResul
 
     risk_free_for_metrics: float | pd.Series | None
     if config.use_mean_risk_free_for_metrics:
+        # Use one average daily risk-free value for all paths when computing ratios.
         risk_free_for_metrics = float(daily_rate.mean())
     else:
+        # Let metrics module use its default behavior when no risk-free input is provided.
         risk_free_for_metrics = None
 
+    # Compute performance and risk statistics from the simulated portfolio outcomes.
     metrics_result = evaluate_metrics_from_simulation_result(
         simulation_result=portfolio_result,
         risk_free_daily=risk_free_for_metrics,
         ruin_threshold_fraction=config.metrics_ruin_threshold_fraction,
     )
 
+    # Return all intermediate and final artifacts for analysis and plotting.
     return CompleteSimulationResult(
         historical_asset_returns=historical_asset_returns,
         aligned_daily_rate=daily_rate,

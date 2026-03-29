@@ -169,5 +169,6 @@ def load_market_data(
 	annual_rate = fetch_fred_annual_rate(fred_series=fred_series, start=start, end=end)
 	daily_rate = annual_to_daily_rate(annual_rate, trading_days=TRADING_DAYS_PER_YEAR, is_percent=fred_is_percent)
 
+	#returns daily returns and daily rates to apply the leverage
 	return align_returns_and_daily_rate(asset_returns=returns, daily_rate=daily_rate)
 
