@@ -78,6 +78,8 @@ class MonteCarloConfig:
     seed: int | None = None
 
 
+#simulation config will be passed to the main.ipynb to run the full simulation,
+#it contains all the necessary information 
 @dataclass(frozen=True)
 class SimulationConfig:
     """Single object passed from main.ipynb to run the full simulation."""
@@ -86,6 +88,7 @@ class SimulationConfig:
     assets: list[AssetConfig]
     portfolio: PortfolioConfig
     monte_carlo: MonteCarloConfig
+    
     # portfolio is considered ruined if wealth falls below this fraction 
     # of initial capital at any point in the path
     metrics_ruin_threshold_fraction: float = 0.10
@@ -104,9 +107,30 @@ class CompleteSimulationResult:
 
 
 def _validate_assets(assets: list[AssetConfig]) -> None:
+    # Common notebook typo: writing `asset_info = [...],` creates a tuple(list).
+    if isinstance(assets, tuple) and len(assets) == 1 and isinstance(assets[0], list):
+        raise ValueError(
+            "assets must be a list of AssetConfig, not a tuple containing a list. "
+            "If this comes from `asset_info`, remove the trailing comma after `]`."
+        )
+
+    if not isinstance(assets, list):
+        raise ValueError("assets must be a list of AssetConfig entries.")
+
     # Guard against an invalid simulation setup with no assets at all.
     if not assets:
         raise ValueError("assets cannot be empty.")
+
+    invalid_idx = [
+        i
+        for i, asset in enumerate(assets)
+        if not isinstance(asset, (SpotAssetConfig, SyntheticLETFAssetConfig))
+    ]
+    if invalid_idx:
+        raise ValueError(
+            f"assets contains invalid entries at positions: {invalid_idx}. "
+            "Each entry must be SpotAssetConfig or SyntheticLETFAssetConfig."
+        )
 
     # Every asset id is used as a unique key later, so duplicates are not allowed.
     ids = [a.id for a in assets]
@@ -141,6 +165,9 @@ def _build_historical_asset_returns(config: SimulationConfig) -> tuple[pd.DataFr
             base_tickers.add(asset.ticker)
         elif isinstance(asset, SyntheticLETFAssetConfig):
             base_tickers.add(asset.underlying_ticker)
+    
+    print("Base tickers needed for historical data:")
+    print(base_tickers)
 
     
     base_returns, daily_rate = load_market_data(
@@ -160,6 +187,7 @@ def _build_historical_asset_returns(config: SimulationConfig) -> tuple[pd.DataFr
             "Selected rate series has no valid observations in the requested date range."
         )
 
+    
     base_returns = base_returns.loc[overlap_mask]
     daily_rate = daily_rate.loc[overlap_mask]
 
@@ -167,15 +195,18 @@ def _build_historical_asset_returns(config: SimulationConfig) -> tuple[pd.DataFr
     base_returns = base_returns.replace([np.inf, -np.inf], np.nan).dropna(how="any")
     daily_rate = daily_rate.reindex(base_returns.index).ffill()
 
+
+    #check for empty
     if base_returns.empty:
         raise ValueError(
             "No overlapping asset-return/rate history after alignment. "
             "Use a different rate series or a later start date."
         )
 
-
+    #empty dict 
     asset_return_series: dict[str, pd.Series] = {}
     for asset in config.assets:
+        # spot asset - just rename the base return series to the asset id and add to the dict
         if isinstance(asset, SpotAssetConfig):
             if asset.ticker not in base_returns.columns:
                 raise ValueError(f"Missing returns for spot ticker '{asset.ticker}'.")
@@ -207,6 +238,7 @@ def _build_historical_asset_returns(config: SimulationConfig) -> tuple[pd.DataFr
     #build historical returns asset with both spot and synthetic etf returns
     historical_asset_returns = pd.concat(asset_return_series.values(), axis=1)
     # Final cleanup in case synthetic series introduced any non-finite values.
+    #replace inf values 
     historical_asset_returns = historical_asset_returns.replace([np.inf, -np.inf], np.nan).dropna(how="any")
 
 
@@ -226,6 +258,8 @@ def run_complete_simulation(config: SimulationConfig) -> CompleteSimulationResul
 
     This is the one-call orchestration API intended for main.ipynb usage.
     """
+    _validate_assets(config.assets)
+
     # Validate that portfolio weights reference known assets.
     asset_ids = {asset.id for asset in config.assets}
     _validate_target_weights(config.portfolio.target_weights, valid_asset_ids=asset_ids)
