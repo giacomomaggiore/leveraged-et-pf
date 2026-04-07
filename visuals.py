@@ -126,7 +126,7 @@ def plot_spaghetti_paths(
                 color="#1f4e79",
             )
 
-        y_label = "Normalized Wealth" if normalize_to_1 else "Portfolio Value"
+        #y_label = "Normalized Wealth" if normalize_to_1 else "Portfolio Value"
         ax.set_xlabel("Trading Day")
         ax.set_ylabel(y_label)
         ax.grid(True, linestyle="--", alpha=0.25)
@@ -196,7 +196,7 @@ def plot_spaghetti_paths(
     }
 
     if subtitle:
-        layout_kwargs["margin"] = {"t": 140, "l": 80, "r": 40}
+        layout_kwargs["margin"] = {"t": 200, "l": 80, "r": 40}
         fig.add_annotation(
             x=x_positions[subtitle_align],
             y=1.06,
@@ -334,7 +334,6 @@ def plot_drawdown_chart(
         ax.plot(x, median_dd, lw=2.2, color="#1f77b4", label="Median Drawdown")
         ax.plot(x, worst_dd, lw=2.2, color="#d62728", label="Worst-Case Drawdown")
         ax.set_title(title, fontsize=18, fontweight="bold", pad=14)
-        ax.set_xlabel("Trading Day")
         ax.set_ylabel("Drawdown (%)")
         ax.grid(True, linestyle="--", alpha=0.25)
         ax.legend(loc="best", frameon=False)

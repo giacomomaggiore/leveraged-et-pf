@@ -23,7 +23,7 @@ from pandas_datareader import data as web
 TRADING_DAYS_PER_YEAR = 252
 YF_MAX_RETRIES = 4
 YF_BASE_BACKOFF_SECONDS = 1.0
-PRICE_CACHE_DIR = Path(__ggggfile__).resolve().parent / "output" / "price_cache"
+PRICE_CACHE_DIR = Path(__file__).resolve().parent / "data"
 
 
 def _is_rate_limit_error(exc: Exception) -> bool:
@@ -108,7 +108,7 @@ def _load_cached_symbol_prices(
 	start: str | datetime,
 	end: str | datetime,
 ) -> pd.Series | None:
-	"""Load cached symbol prices if they fully cover the requested date range."""
+	"""Load cached symbol prices for the requested range when overlap exists."""
 	cache_path = _cache_path_for_symbol(symbol)
 	if not cache_path.exists():
 		return None
@@ -127,10 +127,23 @@ def _load_cached_symbol_prices(
 
 	start_ts = pd.Timestamp(start)
 	end_ts = pd.Timestamp(end)
-	if series.index.min() > start_ts or series.index.max() < end_ts:
+	if series.index.max() < start_ts or series.index.min() > end_ts:
 		return None
 
-	return series.loc[(series.index >= start_ts) & (series.index <= end_ts)]
+	overlap = series.loc[(series.index >= start_ts) & (series.index <= end_ts)]
+	if overlap.empty:
+		return None
+
+	if overlap.index.max() < end_ts:
+		warnings.warn(
+			(
+				f"Using local cached {symbol} up to {overlap.index.max().date()} "
+				f"(requested end={end_ts.date()})."
+			),
+			RuntimeWarning,
+		)
+
+	return overlap
 
 
 def _save_cached_symbol_prices(symbol: str, series: pd.Series) -> None:
@@ -233,6 +246,11 @@ def download_adj_close_prices(
 	missing_symbols = [s for s in uncached_symbols if s not in available_symbols]
 
 	if not missing_symbols and (not batch_adj_close.empty or cached_frames):
+		# Persist fresh batch data before returning the assembled frame.
+		if not batch_adj_close.empty:
+			for symbol in available_symbols:
+				_save_cached_symbol_prices(symbol=symbol, series=batch_adj_close[symbol].dropna())
+
 		parts = []
 		if cached_frames:
 			parts.extend(cached_frames)

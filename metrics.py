@@ -225,17 +225,17 @@ def evaluate_paths_metrics(
     pathwise = pd.DataFrame(
         {
             "CAGR": cagr,
-            "MaxDrawdown": max_dd,
-            "DrawdownDurationDays": dd_duration,
-            "Sharpe": sharpe,
-            "Sortino": sortino,
-            "UlcerIndex": ulcer,
+            "Max Drawdown": max_dd,
+            "Drawdown Duration (Days)": dd_duration,
+            "Sharpe Ratio": sharpe,
+            "Sortino Ratio": sortino,
+            "Ulcer Index": ulcer,
             "Ruined": ruined.astype(int),
         }
     )
 
     summary = _summary_stats(pathwise)
-    summary.loc["ProbabilityOfRuin"] = {
+    summary.loc["Probability Of Ruin"] = {
         "mean": probability_of_ruin,
         "median": probability_of_ruin,
         "p5": probability_of_ruin,
