@@ -11,6 +11,7 @@ This module provides:
 from __future__ import annotations
 
 import time
+import random
 from datetime import datetime
 from pathlib import Path
 from typing import Iterable
@@ -21,8 +22,10 @@ import yfinance as yf
 from pandas_datareader import data as web
 
 TRADING_DAYS_PER_YEAR = 252
-YF_MAX_RETRIES = 4
-YF_BASE_BACKOFF_SECONDS = 1.0
+YF_MAX_RETRIES = 6
+YF_BASE_BACKOFF_SECONDS = 2.0
+YF_JITTER_FRACTION = 0.35
+YF_MAX_BACKOFF_SECONDS = 90.0
 PRICE_CACHE_DIR = Path(__file__).resolve().parent / "data"
 
 
@@ -58,7 +61,9 @@ def _yf_download_with_retries(
 			if not _is_rate_limit_error(exc) or attempt == max_retries:
 				raise
 
-			sleep_s = base_backoff_seconds * (2 ** (attempt - 1))
+			exponential = base_backoff_seconds * (2 ** (attempt - 1))
+			jitter = random.uniform(0.0, exponential * YF_JITTER_FRACTION)
+			sleep_s = min(YF_MAX_BACKOFF_SECONDS, exponential + jitter)
 			warnings.warn(
 				(
 					f"yfinance rate-limited for {tickers}. "
@@ -134,15 +139,6 @@ def _load_cached_symbol_prices(
 	if overlap.empty:
 		return None
 
-	if overlap.index.max() < end_ts:
-		warnings.warn(
-			(
-				f"Using local cached {symbol} up to {overlap.index.max().date()} "
-				f"(requested end={end_ts.date()})."
-			),
-			RuntimeWarning,
-		)
-
 	return overlap
 
 
@@ -152,8 +148,22 @@ def _save_cached_symbol_prices(symbol: str, series: pd.Series) -> None:
 		return
 
 	PRICE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-	frame = series.sort_index().to_frame(name="Adj Close")
-	frame.to_csv(_cache_path_for_symbol(symbol))
+	cache_path = _cache_path_for_symbol(symbol)
+	new_series = series.dropna().sort_index()
+
+	if cache_path.exists():
+		try:
+			existing = pd.read_csv(cache_path, index_col=0, parse_dates=True)
+		except Exception:
+			existing = pd.DataFrame()
+
+		if not existing.empty and "Adj Close" in existing.columns:
+			existing_series = existing["Adj Close"].dropna().sort_index()
+			new_series = pd.concat([existing_series, new_series]).sort_index()
+			new_series = new_series[~new_series.index.duplicated(keep="last")]
+
+	frame = new_series.to_frame(name="Adj Close")
+	frame.to_csv(cache_path)
 
 
 def _stooq_candidates(symbol: str) -> list[str]:
@@ -216,65 +226,140 @@ def download_adj_close_prices(
 		Trading-day indexed DataFrame with one column per ticker.
 	"""
 	symbols = _normalize_tickers(tickers)
+	start_ts = pd.Timestamp(start)
+	end_ts = pd.Timestamp(end)
+	one_day = pd.Timedelta(days=1)
+	yf_end_ts = end_ts + one_day
 
 	cached_frames: list[pd.DataFrame] = []
-	uncached_symbols: list[str] = []
+	online_start_by_symbol: dict[str, pd.Timestamp] = {}
+	online_reason_by_symbol: dict[str, str] = {}
 	for symbol in symbols:
 		cached_series = _load_cached_symbol_prices(symbol=symbol, start=start, end=end)
 		if cached_series is None or cached_series.empty:
-			uncached_symbols.append(symbol)
+			online_start_by_symbol[symbol] = start_ts
+			online_reason_by_symbol[symbol] = "cache_miss"
 			continue
 
 		cached_frames.append(cached_series.to_frame(name=symbol))
 
-	if uncached_symbols:
-		warnings.warn(
-			f"Local cache miss for symbols: {uncached_symbols}. Attempting online providers.",
-			RuntimeWarning,
-		)
+		cached_max = pd.Timestamp(cached_series.index.max())
+		if cached_max < end_ts:
+			refresh_start = cached_max + one_day
+			if refresh_start <= end_ts:
+				online_start_by_symbol[symbol] = refresh_start
+				online_reason_by_symbol[symbol] = "cache_stale"
+				warnings.warn(
+					(
+						f"Local cached {symbol} is stale at {cached_max.date()} "
+						f"(requested end={end_ts.date()}); fetching incremental updates online."
+					),
+					RuntimeWarning,
+				)
 
-	batch_raw = _yf_download_with_retries(tickers=uncached_symbols, start=start, end=end) if uncached_symbols else pd.DataFrame()
+	online_symbols = list(online_start_by_symbol.keys())
+	if online_symbols:
+		missing_only = [s for s in online_symbols if online_reason_by_symbol.get(s) == "cache_miss"]
+		refresh_only = [s for s in online_symbols if online_reason_by_symbol.get(s) != "cache_miss"]
+		if missing_only:
+			warnings.warn(
+				f"Local cache miss for symbols: {missing_only}. Attempting online providers.",
+				RuntimeWarning,
+			)
+		if refresh_only:
+			warnings.warn(
+				f"Local cache refresh required for symbols: {refresh_only}. Attempting online providers.",
+				RuntimeWarning,
+			)
+
+	batch_start = min(online_start_by_symbol.values()) if online_symbols else start_ts
+
+	batch_raw = _yf_download_with_retries(tickers=online_symbols, start=batch_start, end=yf_end_ts) if online_symbols else pd.DataFrame()
 	try:
-		batch_adj_close = _extract_adj_close(batch_raw, symbols=uncached_symbols) if uncached_symbols else pd.DataFrame()
+		batch_adj_close = _extract_adj_close(batch_raw, symbols=online_symbols) if online_symbols else pd.DataFrame()
 	except ValueError:
 		batch_adj_close = pd.DataFrame()
 
-	available_symbols = [
-		s for s in uncached_symbols
-		if s in batch_adj_close.columns and not batch_adj_close[s].dropna().empty
-	]
-	missing_symbols = [s for s in uncached_symbols if s not in available_symbols]
+	batch_frames: list[pd.DataFrame] = []
+	available_symbols: list[str] = []
+	missing_symbols: list[str] = []
+	for symbol in online_symbols:
+		if symbol not in batch_adj_close.columns:
+			missing_symbols.append(symbol)
+			continue
 
-	if not missing_symbols and (not batch_adj_close.empty or cached_frames):
+		filtered = batch_adj_close[symbol].dropna()
+		filtered = filtered.loc[filtered.index >= online_start_by_symbol[symbol]]
+		if filtered.empty:
+			missing_symbols.append(symbol)
+			continue
+
+		available_symbols.append(symbol)
+		batch_frames.append(filtered.to_frame(name=symbol))
+
+	likely_batch_provider_failure = bool(online_symbols) and not available_symbols and batch_adj_close.empty
+
+	if not missing_symbols and (batch_frames or cached_frames):
 		# Persist fresh batch data before returning the assembled frame.
-		if not batch_adj_close.empty:
-			for symbol in available_symbols:
-				_save_cached_symbol_prices(symbol=symbol, series=batch_adj_close[symbol].dropna())
+		for frame in batch_frames:
+			symbol = str(frame.columns[0])
+			_save_cached_symbol_prices(symbol=symbol, series=frame[symbol].dropna())
 
 		parts = []
 		if cached_frames:
 			parts.extend(cached_frames)
-		if not batch_adj_close.empty:
-			parts.append(batch_adj_close[available_symbols])
+		if batch_frames:
+			parts.extend(batch_frames)
 		combined_fast = pd.concat(parts, axis=1) if parts else pd.DataFrame()
+		combined_fast = combined_fast[~combined_fast.index.duplicated(keep="last")]
 		return combined_fast[symbols].sort_index()
 
 	if missing_symbols:
 		warnings.warn(
 			(
 				"Batch yfinance download returned incomplete data. "
-				f"Falling back to per-ticker requests for: {missing_symbols}"
+				f"Falling back to per-ticker recovery for: {missing_symbols}"
+			),
+			RuntimeWarning,
+		)
+
+	if likely_batch_provider_failure and missing_symbols:
+		warnings.warn(
+			(
+				"Yahoo Finance batch response returned no usable rows for all uncached symbols. "
+				"Likely temporary provider throttling; skipping repeated per-ticker Yahoo calls."
 			),
 			RuntimeWarning,
 		)
 
 	fallback_frames: list[pd.DataFrame] = []
 	for symbol in missing_symbols:
+		fetch_start = online_start_by_symbol[symbol]
+		if likely_batch_provider_failure:
+			stooq_series = _download_from_stooq(symbol=symbol, start=fetch_start, end=end_ts)
+			if stooq_series is not None and not stooq_series.empty:
+				warnings.warn(
+					f"Recovered {symbol} via stooq after Yahoo batch failure.",
+					RuntimeWarning,
+				)
+				fallback_frames.append(stooq_series.to_frame(name=symbol))
+				_save_cached_symbol_prices(symbol=symbol, series=stooq_series)
+				continue
+
+			warnings.warn(
+				(
+					f"No fallback data source could recover {symbol} after Yahoo batch failure. "
+					"Try again later or provide a local cache CSV in data/."
+				),
+				RuntimeWarning,
+			)
+			continue
+
 		try:
-			single_raw = _yf_download_with_retries(tickers=[symbol], start=start, end=end)
+			single_raw = _yf_download_with_retries(tickers=[symbol], start=fetch_start, end=yf_end_ts)
 			single_adj_close = _extract_adj_close(single_raw, symbols=[symbol])
 			if single_adj_close.empty or symbol not in single_adj_close.columns:
-				stooq_series = _download_from_stooq(symbol=symbol, start=start, end=end)
+				stooq_series = _download_from_stooq(symbol=symbol, start=fetch_start, end=end_ts)
 				if stooq_series is not None and not stooq_series.empty:
 					warnings.warn(
 						f"Recovered {symbol} via stooq after empty Yahoo response.",
@@ -287,7 +372,7 @@ def download_adj_close_prices(
 			_save_cached_symbol_prices(symbol=symbol, series=single_adj_close[symbol].dropna())
 		except Exception as exc:  # pragma: no cover - depends on upstream API behavior
 			if _is_rate_limit_error(exc):
-				stooq_series = _download_from_stooq(symbol=symbol, start=start, end=end)
+				stooq_series = _download_from_stooq(symbol=symbol, start=fetch_start, end=end_ts)
 				if stooq_series is not None and not stooq_series.empty:
 					warnings.warn(
 						f"Recovered {symbol} via stooq after Yahoo rate limit.",
@@ -301,10 +386,10 @@ def download_adj_close_prices(
 				continue
 			raise
 
-	batch_part = batch_adj_close[available_symbols].copy() if available_symbols else pd.DataFrame()
+	batch_part = pd.concat(batch_frames, axis=1) if batch_frames else pd.DataFrame()
 	if not batch_part.empty:
-		for symbol in available_symbols:
-			_save_cached_symbol_prices(symbol=symbol, series=batch_part[symbol].dropna())
+		for symbol in batch_part.columns:
+			_save_cached_symbol_prices(symbol=str(symbol), series=batch_part[str(symbol)].dropna())
 
 	combined_parts: list[pd.DataFrame] = []
 	if cached_frames:
@@ -315,6 +400,7 @@ def download_adj_close_prices(
 	combined = pd.concat(combined_parts, axis=1) if combined_parts else pd.DataFrame()
 	if fallback_frames:
 		combined = pd.concat([combined, *fallback_frames], axis=1)
+	combined = combined[~combined.index.duplicated(keep="last")]
 
 	if combined.empty:
 		raise ValueError("No price data returned by yfinance for requested inputs.")
