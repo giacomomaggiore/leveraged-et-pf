@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Literal, Mapping, Union
 
 import numpy as np
@@ -11,6 +12,122 @@ from letf_engine import synthetic_letf_daily_returns
 from metrics import MetricsResult, evaluate_metrics_from_simulation_result
 from montecarlo import simulate_monte_carlo
 from portfolio_sim import SimulationResult, simulate_portfolio_paths
+
+
+def _canonical_portfolio_name(config: "SimulationConfig") -> str:
+    """Build a stable portfolio identifier from ticker, weight, and leverage."""
+    rows: list[tuple[str, float, float]] = []
+
+    for asset in sorted(config.assets, key=lambda a: a.id):
+        weight = float(config.portfolio.target_weights.get(asset.id, 0.0))
+
+        if isinstance(asset, SpotAssetConfig):
+            ticker = asset.ticker
+            leverage = 1.0
+        else:
+            ticker = asset.underlying_ticker
+            leverage = float(asset.leverage)
+
+        rows.append((ticker, weight, leverage))
+
+    return " | ".join(
+        f"{ticker} w={weight:.6f} lev={leverage:.6f}"
+        for ticker, weight, leverage in rows
+    )
+
+
+def _flatten_metrics_summary(metrics_summary: pd.DataFrame) -> dict[str, float]:
+    """Flatten summary table to one CSV row with deterministic column names."""
+    if not isinstance(metrics_summary, pd.DataFrame):
+        raise TypeError("metrics_summary must be a pandas DataFrame.")
+
+    out: dict[str, float] = {}
+    for metric_name, row in metrics_summary.iterrows():
+        metric = str(metric_name).strip().replace(" ", "_")
+        for stat_name, value in row.items():
+            stat = str(stat_name).strip().replace(" ", "_")
+            key = f"{metric}__{stat}"
+            out[key] = float(value) if pd.notna(value) else np.nan
+
+    return out
+
+
+def save_portfolio_metrics_summary(
+    *,
+    config: "SimulationConfig",
+    metrics_summary: pd.DataFrame,
+    output_csv_path: str | Path = "output/portfolio_metrics_summary.csv",
+) -> Path:
+    """Upsert one portfolio summary row in output CSV.
+
+    If a row with the same canonical portfolio composition already exists,
+    it is updated. Otherwise, a new row is appended.
+    """
+    portfolio_composition = _canonical_portfolio_name(config)
+    row_payload = {
+        "portfolio composition": portfolio_composition,
+        **_flatten_metrics_summary(metrics_summary),
+    }
+
+    csv_path = Path(output_csv_path)
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+
+    new_row = pd.DataFrame([row_payload])
+
+    if csv_path.exists():
+        existing = pd.read_csv(csv_path)
+
+        # Backward compatibility with previous schema.
+        if "portfolio_name" in existing.columns and "portfolio composition" not in existing.columns:
+            existing = existing.rename(columns={"portfolio_name": "portfolio composition"})
+
+        if "portfolio composition" not in existing.columns:
+            raise ValueError(
+                f"Existing CSV '{csv_path}' must contain a 'portfolio composition' column."
+            )
+
+        if "portfolio_name" not in existing.columns:
+            existing["portfolio_name"] = ""
+
+        # Keep existing column order and extend only when new metrics appear.
+        all_columns = [
+            "portfolio composition",
+            "portfolio_name",
+            *[
+                c
+                for c in existing.columns
+                if c not in {"portfolio composition", "portfolio_name"}
+            ],
+        ]
+        for col in new_row.columns:
+            if col not in all_columns:
+                all_columns.append(col)
+
+        if "portfolio_name" not in new_row.columns:
+            new_row["portfolio_name"] = ""
+
+        existing = existing.reindex(columns=all_columns)
+        new_row = new_row.reindex(columns=all_columns)
+
+        match_mask = existing["portfolio composition"] == portfolio_composition
+        if bool(match_mask.any()):
+            # Do not overwrite user-managed portfolio_name labels.
+            update_columns = [c for c in all_columns if c != "portfolio_name"]
+            existing.loc[match_mask, update_columns] = new_row.iloc[0][update_columns].tolist()
+            final_df = existing
+        else:
+            final_df = pd.concat([existing, new_row], ignore_index=True)
+    else:
+        final_df = new_row
+
+    ordered_cols = [
+        "portfolio composition",
+        "portfolio_name",
+        *[c for c in final_df.columns if c not in {"portfolio composition", "portfolio_name"}],
+    ]
+    final_df = final_df[ordered_cols]
+    final_df.to_csv(csv_path, index=False)
+    return csv_path
 
 #dataclass definition
 #datafrozen = readonly after creation
