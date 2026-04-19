@@ -73,6 +73,8 @@ def save_portfolio_metrics_summary(
     csv_path.parent.mkdir(parents=True, exist_ok=True)
 
     new_row = pd.DataFrame([row_payload])
+    if "portfolio_name" not in new_row.columns:
+        new_row["portfolio_name"] = ""
 
     if csv_path.exists():
         existing = pd.read_csv(csv_path)
@@ -119,6 +121,9 @@ def save_portfolio_metrics_summary(
             final_df = pd.concat([existing, new_row], ignore_index=True)
     else:
         final_df = new_row
+
+    if "portfolio_name" not in final_df.columns:
+        final_df["portfolio_name"] = ""
 
     ordered_cols = [
         "portfolio composition",
