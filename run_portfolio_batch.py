@@ -5,6 +5,8 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 from orchestration import (
     CompleteSimulationResult,
@@ -18,12 +20,12 @@ from orchestration import (
     run_complete_simulation,
     save_portfolio_metrics_summary,
 )
-from visuals import plot_drawdown_chart, plot_spaghetti_paths, plot_terminal_wealth_distribution
+from visuals import plot_spaghetti_paths, plot_terminal_wealth_distribution
 
 
 DEFAULT_TER = 0.0092
 DEFAULT_SPREAD = 0.0030
-OUTPUT_DIR = Path("output_2")
+OUTPUT_DIR = Path("output")
 AGGREGATE_CSV = OUTPUT_DIR / "portfolio_metrics_summary.csv"
 
 
@@ -115,15 +117,6 @@ def _set_portfolio_name(csv_path: Path, config: SimulationConfig, portfolio_name
     df.to_csv(csv_path, index=False)
 
 
-def _save_plotly_figure(fig, png_path: Path, html_path: Path) -> None:
-    # Always persist an interactive HTML, then try static PNG export.
-    fig.write_html(html_path, include_plotlyjs="cdn")
-    try:
-        fig.write_image(png_path, format="png", scale=2)
-    except Exception as exc:
-        print(f"    Warning: could not export PNG '{png_path.name}' ({exc}). HTML was saved.")
-
-
 def _build_assets_subtitle(config: SimulationConfig) -> str:
     rows: list[str] = []
     for asset in config.assets:
@@ -138,6 +131,22 @@ def _build_assets_subtitle(config: SimulationConfig) -> str:
     return "<br>".join(rows)
 
 
+def _cleanup_legacy_exports(output_dir: Path) -> None:
+    legacy_files = [
+        "spaghetti.png",
+        "spaghetti.html",
+        "terminal_distribution.png",
+        "terminal_distribution.html",
+        "drawdown.png",
+        "drawdown.html",
+        "metrics_summary_table.csv",
+    ]
+    for filename in legacy_files:
+        path = output_dir / filename
+        if path.exists():
+            path.unlink()
+
+
 def _export_figures(
     *,
     portfolio_name: str,
@@ -149,16 +158,28 @@ def _export_figures(
     terminal = wealth_paths[:, -1]
     subtitle = _build_assets_subtitle(config)
 
+    terminal_summary = pd.Series(
+        {
+            "min": float(np.min(terminal)),
+            "p5": float(np.quantile(terminal, 0.05)),
+            "median": float(np.median(terminal)),
+            "mean": float(np.mean(terminal)),
+            "p95": float(np.quantile(terminal, 0.95)),
+            "max": float(np.max(terminal)),
+        },
+        name="TerminalWealth",
+    )
+
     summary_note = (
         f"FRED={config.market.fred_series}"
         "<br>"
         f"{config.monte_carlo.n_paths:,} draws | {config.monte_carlo.horizon_days} horizon days"
         "<br>"
-        f"Method={config.monte_carlo.method} | Distribution={config.monte_carlo.distribution}"
+        f"{config.monte_carlo.method} Method<br>Distribution={config.monte_carlo.distribution}<br>Student_t_df={config.monte_carlo.student_t_df}"
         "<br>"
-        f"Initial capital={config.portfolio.initial_capital:,.2f} | Rebalance={config.portfolio.rebalance_frequency_days} days"
+        f"Initial capital={config.portfolio.initial_capital:,.2f}<br>Rebalancing Frequency={config.portfolio.rebalance_frequency_days} days"
         "<br>"
-        f"Tolerance={config.portfolio.tolerance_band:.2%} | Tax={config.portfolio.capital_gains_tax_rate:.2%}"
+        f"Tolerance band={config.portfolio.tolerance_band:.2%}<br>Capital Gain Tax={config.portfolio.capital_gains_tax_rate:.2%}"
     )
 
     fig_spaghetti = plot_spaghetti_paths(
@@ -166,69 +187,244 @@ def _export_figures(
         n_sample=100,
         seed=42,
         normalize_to_1=False,
-        title=f"Monte Carlo Spaghetti - {portfolio_name}",
+        title="Monte Carlo Spaghetti",
         subtitle=subtitle,
         bottom_note=summary_note,
         subtitle_align="left",
         bottom_note_align="left",
-        bottom_note_x=0.0,
-        bottom_note_y=-0.15,
+        bottom_note_x=0.65,
+        bottom_note_y=-0.10,
         bottom_note_box=True,
         backend="plotly",
-        width=1200,
-        height=800,
+        width=800,
+        height=600,
     )
+    fig_spaghetti.update_xaxes(title_text="")
 
     fig_terminal = plot_terminal_wealth_distribution(
         wealth_paths=wealth_paths,
         bins=60,
-        title=f"Terminal Wealth Distribution - {portfolio_name}",
+        title="Distribution of Terminal Wealth",
         backend="plotly",
-        width=1200,
-        height=800,
+        width=800,
+        height=600,
     )
 
-    fig_drawdown = plot_drawdown_chart(
-        wealth_paths=wealth_paths,
-        drawdowns=result.metrics.drawdowns,
-        title=f"Drawdown Chart - {portfolio_name}",
-        backend="plotly",
-        width=1200,
-        height=800,
+    terminal_footnote = (
+        f"min={terminal_summary['min']:,.0f} | p5={terminal_summary['p5']:,.0f} | "
+        f"median={terminal_summary['median']:,.0f} | mean={terminal_summary['mean']:,.0f} | "
+        f"p95={terminal_summary['p95']:,.0f} | max={terminal_summary['max']:,.0f}"
+    )
+    fig_combined = make_subplots(
+        rows=2,
+        cols=1,
+        shared_xaxes=False,
+        vertical_spacing=0.28,
+        row_heights=[0.5, 0.5],
     )
 
-    terminal_note = (
-        f"min={float(np.min(terminal)):,.0f} | p5={float(np.quantile(terminal, 0.05)):,.0f} | "
-        f"median={float(np.median(terminal)):,.0f} | mean={float(np.mean(terminal)):,.0f} | "
-        f"p95={float(np.quantile(terminal, 0.95)):,.0f} | max={float(np.max(terminal)):,.0f}"
+    for tr in fig_spaghetti.data:
+        fig_combined.add_trace(tr, row=1, col=1)
+
+    for tr in fig_terminal.data:
+        fig_combined.add_trace(tr, row=2, col=1)
+
+    fig_combined.update_layout(
+        width=900,
+        height=1050,
+        margin={"t": 110, "b": 100, "l": 70, "r": 30},
+        showlegend=fig_spaghetti.layout.showlegend if fig_spaghetti.layout.showlegend is not None else False,
+        font={"family": "Satoshi, 'Satoshi Variable', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif", "size": 12, "color": "#0f172a"},
+        title_font={"family": "Satoshi"},
     )
-    fig_terminal.add_annotation(
+
+    fig_combined.update_xaxes(title_text="", row=1, col=1)
+    fig_combined.update_yaxes(
+        title_text=fig_spaghetti.layout.yaxis.title.text if fig_spaghetti.layout.yaxis.title is not None else "Portfolio Value",
+        row=1,
+        col=1,
+        showgrid=fig_spaghetti.layout.yaxis.showgrid if fig_spaghetti.layout.yaxis.showgrid is not None else True,
+        gridcolor=fig_spaghetti.layout.yaxis.gridcolor if fig_spaghetti.layout.yaxis.gridcolor is not None else None,
+    )
+
+    fig_combined.update_xaxes(
+        title_text=fig_terminal.layout.xaxis.title.text if fig_terminal.layout.xaxis.title is not None else "Terminal Wealth",
+        row=2,
+        col=1,
+        showgrid=fig_terminal.layout.xaxis.showgrid if fig_terminal.layout.xaxis.showgrid is not None else True,
+        gridcolor=fig_terminal.layout.xaxis.gridcolor if fig_terminal.layout.xaxis.gridcolor is not None else None,
+    )
+    fig_combined.update_yaxes(
+        title_text=fig_terminal.layout.yaxis.title.text if fig_terminal.layout.yaxis.title is not None else "Frequency",
+        row=2,
+        col=1,
+        showgrid=fig_terminal.layout.yaxis.showgrid if fig_terminal.layout.yaxis.showgrid is not None else True,
+        gridcolor=fig_terminal.layout.yaxis.gridcolor if fig_terminal.layout.yaxis.gridcolor is not None else None,
+    )
+
+    fig_combined.add_annotation(
         x=0.0,
-        y=-0.18,
+        y=1.12,
         xref="paper",
         yref="paper",
-        text=terminal_note,
+        text="Monte Carlo Spaghetti",
+        showarrow=False,
+        xanchor="left",
+        yanchor="top",
+        font={"size": 20, "color": "#0f172a"},
+    )
+
+    fig_combined.add_annotation(
+        x=0.0,
+        y=1.07,
+        xref="paper",
+        yref="paper",
+        text=subtitle,
         showarrow=False,
         xanchor="left",
         yanchor="top",
         align="left",
+        font={"size": 12, "color": "#334155"},
     )
 
-    _save_plotly_figure(
-        fig_spaghetti,
-        output_dir / "spaghetti.png",
-        output_dir / "spaghetti.html",
+    summary_box_y = 0.59
+    metrics_box_y = 0.59
+
+    fig_combined.add_annotation(
+        x=0.65,
+        y=summary_box_y,
+        xref="paper",
+        yref="paper",
+        text=summary_note,
+        showarrow=False,
+        xanchor="left",
+        yanchor="top",
+        align="left",
+        font={"size": 11, "color": "#334155"},
+        bgcolor="rgba(255, 255, 255, 0.82)",
+        bordercolor="#cbd5e1",
+        borderwidth=1,
     )
-    _save_plotly_figure(
-        fig_terminal,
-        output_dir / "terminal_distribution.png",
-        output_dir / "terminal_distribution.html",
+
+    metrics_summary = result.metrics.summary
+    if isinstance(metrics_summary, pd.DataFrame):
+        if metrics_summary.shape[1] == 1:
+            metrics_series = metrics_summary.iloc[:, 0]
+        else:
+            metrics_series = metrics_summary.mean(axis=1)
+    else:
+        metrics_series = pd.Series(metrics_summary)
+
+    def _fmt_metric_value(v: object) -> str:
+        if isinstance(v, (float, np.floating)):
+            if abs(v) >= 1000:
+                return f"{v:,.2f}"
+            return f"{v:.4f}"
+        return str(v)
+
+    metrics_table_df = pd.DataFrame(
+        {
+            "Metric": [str(idx) for idx in metrics_series.index],
+            "Value": [_fmt_metric_value(v) for v in metrics_series.values],
+        }
     )
-    _save_plotly_figure(
-        fig_drawdown,
-        output_dir / "drawdown.png",
-        output_dir / "drawdown.html",
+
+    n_metrics = len(metrics_table_df)
+    n_rows = max(1, int(np.ceil(n_metrics / 2)))
+    left_metrics = metrics_table_df.iloc[:n_rows].reset_index(drop=True)
+    right_metrics = metrics_table_df.iloc[n_rows:].reset_index(drop=True)
+    if len(right_metrics) < n_rows:
+        right_metrics = pd.concat(
+            [
+                right_metrics,
+                pd.DataFrame(
+                    {
+                        "Metric": [""] * (n_rows - len(right_metrics)),
+                        "Value": [""] * (n_rows - len(right_metrics)),
+                    }
+                ),
+            ],
+            ignore_index=True,
+        )
+
+    table_top = metrics_box_y
+    table_height = 0.13
+    table_left = 0.00
+    table_width = 0.58
+
+    row_fill = ["#ffffff" if i % 2 == 0 else "#f8fafc" for i in range(n_rows)]
+
+    fig_combined.add_trace(
+        go.Table(
+            columnwidth=[0.34, 0.16, 0.34, 0.16],
+            header={
+                "values": ["<b>Metric</b>", "<b>Value</b>", "<b>Metric</b>", "<b>Value</b>"],
+                "align": ["left", "right", "left", "right"],
+                "fill_color": "#e2e8f0",
+                "font": {"family": "Satoshi", "size": 11, "color": "#0f172a"},
+                "line_color": "#cbd5e1",
+                "height": 24,
+            },
+            cells={
+                "values": [
+                    left_metrics["Metric"],
+                    left_metrics["Value"],
+                    right_metrics["Metric"],
+                    right_metrics["Value"],
+                ],
+                "align": ["left", "right", "left", "right"],
+                "fill_color": [row_fill, row_fill, row_fill, row_fill],
+                "font": {"family": "Satoshi", "size": 10, "color": "#0f172a"},
+                "line_color": "#e2e8f0",
+                "height": 21,
+            },
+            domain={
+                "x": [table_left, table_left + table_width],
+                "y": [table_top - table_height, table_top],
+            },
+        )
     )
+
+    fig_combined.add_annotation(
+        x=0.0,
+        y=0.40,
+        xref="paper",
+        yref="paper",
+        text="Distribution of Terminal Wealth",
+        showarrow=False,
+        xanchor="left",
+        yanchor="top",
+        font={"size": 18, "color": "#0f172a"},
+    )
+
+    fig_combined.add_annotation(
+        x=0.1,
+        y=-0.05,
+        xref="paper",
+        yref="paper",
+        text=terminal_footnote,
+        showarrow=False,
+        xanchor="left",
+        yanchor="top",
+        align="left",
+        font={"size": 11, "color": "#334155"},
+    )
+
+    for fig in (fig_spaghetti, fig_terminal, fig_combined):
+        fig.update_layout(
+            font={"family": "Satoshi, 'Satoshi Variable', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif", "size": 12, "color": "#0f172a"},
+            title_font={"family": "Satoshi"},
+        )
+        fig.update_xaxes(tickfont={"family": "Satoshi"}, title_font={"family": "Satoshi"})
+        fig.update_yaxes(tickfont={"family": "Satoshi"}, title_font={"family": "Satoshi"})
+
+    if fig_combined.layout.annotations:
+        for ann in fig_combined.layout.annotations:
+            existing_font = ann.font.to_plotly_json() if ann.font else {}
+            ann.font = {**existing_font, "family": "Satoshi"}
+
+    summary_png_path = output_dir / "mc-simulation-summary.png"
+    fig_combined.write_image(summary_png_path, format="png", width=900, height=1050, scale=2)
 
 
 PORTFOLIOS = [
@@ -355,6 +551,7 @@ def run_batch() -> None:
         per_portfolio_dir = OUTPUT_DIR / _slugify(name)
         per_portfolio_dir.mkdir(parents=True, exist_ok=True)
         per_portfolio_csv = per_portfolio_dir / "portfolio_metrics_summary.csv"
+        _cleanup_legacy_exports(per_portfolio_dir)
         save_portfolio_metrics_summary(
             config=config,
             metrics_summary=result.metrics.summary,
@@ -362,10 +559,7 @@ def run_batch() -> None:
         )
         _set_portfolio_name(per_portfolio_csv, config, name)
 
-        # Save the raw metrics table too for easier inspection.
-        result.metrics.summary.to_csv(per_portfolio_dir / "metrics_summary_table.csv")
-
-        # 3) Save figures in each portfolio output folder.
+        # 3) Save one combined summary figure in each portfolio output folder.
         _export_figures(
             portfolio_name=name,
             config=config,
@@ -375,7 +569,7 @@ def run_batch() -> None:
 
         print(f"    Saved: {AGGREGATE_CSV}")
         print(f"    Saved: {per_portfolio_csv}")
-        print(f"    Saved figures under: {per_portfolio_dir}")
+        print(f"    Saved summary figure under: {per_portfolio_dir}")
 
 
 if __name__ == "__main__":
