@@ -505,98 +505,98 @@ def _export_figures(
 
 PORTFOLIOS = [
     {
-        "name": "EQUITY_WORLD_100_VWCE",
+        "name": "EQUITY_WORLD_100_VWRA.L",
         "assets": [
-            {"id": "VWCE", "ticker": "VWCE.MI", "weight": 1.0, "leverage": 1.0},
+            {"id": "VWRA.L", "ticker": "VWRA.L", "weight": 1.0, "leverage": 1.0},
         ],
     },
     {
-        "name": "EQUITY_WORLD_100_VWCE_x1_5",
+        "name": "EQUITY_WORLD_100_VWRA.L_x1_5",
         "assets": [
-            {"id": "VWCE", "ticker": "VWCE.MI", "weight": 1.0, "leverage": 1.5},
+            {"id": "VWRA.L", "ticker": "VWRA.L", "weight": 1.0, "leverage": 1.5},
         ],
     },
     {
-        "name": "EQUITY_WORLD_100_VWCE_x2",
+        "name": "EQUITY_WORLD_100_VWRA.L_x2",
         "assets": [
-            {"id": "VWCE", "ticker": "VWCE.MI", "weight": 1.0, "leverage": 2.0},
+            {"id": "VWRA.L", "ticker": "VWRA.L", "weight": 1.0, "leverage": 2.0},
         ],
     },
     {
-        "name": "EQUITY_WORLD_100_VWCE_x3",
+        "name": "EQUITY_WORLD_100_VWRA.L_x3",
         "assets": [
-            {"id": "VWCE", "ticker": "VWCE.MI", "weight": 1.0, "leverage": 3.0},
+            {"id": "VWRA.L", "ticker": "VWRA.L", "weight": 1.0, "leverage": 3.0},
         ],
     },
     {
         "name": "CLASSIC_60_40",
         "assets": [
-            {"id": "VWCE", "ticker": "VWCE.MI", "weight": 0.60, "leverage": 1.0},
-            {"id": "IGLA", "ticker": "IGLA.L", "weight": 0.40, "leverage": 1.0},
+            {"id": "VWRA.L", "ticker": "VWRA.L", "weight": 0.60, "leverage": 1.0},
+            {"id": "GOVT", "ticker": "GOVT", "weight": 0.40, "leverage": 1.0},
         ],
     },
     {
         "name": "CLASSIC_60_40_x2_x2",
         "assets": [
-            {"id": "VWCE", "ticker": "VWCE.MI", "weight": 0.60, "leverage": 2.0},
-            {"id": "IGLA", "ticker": "IGLA.L", "weight": 0.40, "leverage": 2.0},
+            {"id": "VWRA.L", "ticker": "VWRA.L", "weight": 0.60, "leverage": 2.0},
+            {"id": "GOVT", "ticker": "GOVT", "weight": 0.40, "leverage": 2.0},
         ],
     },
     {
-        "name": "CLASSIC_60_40_VWCE_x2_IGLA_spot",
+        "name": "CLASSIC_60_40_VWRA.L_x2_GOVT_spot",
         "assets": [
-            {"id": "VWCE", "ticker": "VWCE.MI", "weight": 0.60, "leverage": 2.0},
-            {"id": "IGLA", "ticker": "IGLA.L", "weight": 0.40, "leverage": 1.0},
+            {"id": "VWRA.L", "ticker": "VWRA.L", "weight": 0.60, "leverage": 2.0},
+            {"id": "GOVT", "ticker": "GOVT", "weight": 0.40, "leverage": 1.0},
         ],
     },
     {
         "name": "ALL_WEATHER",
         "assets": [
-            {"id": "VWCE", "ticker": "VWCE.MI", "weight": 0.30, "leverage": 1.0},
-            {"id": "UTHY", "ticker": "UTHY", "weight": 0.40, "leverage": 1.0},
-            {"id": "LTPZ", "ticker": "LTPZ", "weight": 0.15, "leverage": 1.0},
-            {"id": "GC", "ticker": "GC=F", "weight": 0.075, "leverage": 1.0},
+            {"id": "VWRA.L", "ticker": "VWRA.L", "weight": 0.30, "leverage": 1.0},
+            {"id": "VGLT", "ticker": "VGLT", "weight": 0.40, "leverage": 1.0},
+            {"id": "IEF", "ticker": "IEF", "weight": 0.15, "leverage": 1.0},
+            {"id": "GLD", "ticker": "GLD", "weight": 0.075, "leverage": 1.0},
             {"id": "PDBC", "ticker": "PDBC", "weight": 0.075, "leverage": 1.0},
         ],
     },
     {
         "name": "ALL_WEATHER_x2",
         "assets": [
-            {"id": "VWCE", "ticker": "VWCE.MI", "weight": 0.30, "leverage": 2.0},
-            {"id": "UTHY", "ticker": "UTHY", "weight": 0.40, "leverage": 2.0},
-            {"id": "LTPZ", "ticker": "LTPZ", "weight": 0.15, "leverage": 2.0},
-            {"id": "GC", "ticker": "GC=F", "weight": 0.075, "leverage": 2.0},
+            {"id": "VWRA.L", "ticker": "VWRA.L", "weight": 0.30, "leverage": 2.0},
+            {"id": "VGLT", "ticker": "VGLT", "weight": 0.40, "leverage": 2.0},
+            {"id": "IEF", "ticker": "IEF", "weight": 0.15, "leverage": 2.0},
+            {"id": "GLD", "ticker": "GLD", "weight": 0.075, "leverage": 2.0},
             {"id": "PDBC", "ticker": "PDBC", "weight": 0.075, "leverage": 2.0},
         ],
     },
     {
         "name": "ALL_WEATHER_x3",
         "assets": [
-            {"id": "VWCE", "ticker": "VWCE.MI", "weight": 0.30, "leverage": 3.0},
-            {"id": "UTHY", "ticker": "UTHY", "weight": 0.40, "leverage": 3.0},
-            {"id": "LTPZ", "ticker": "LTPZ", "weight": 0.15, "leverage": 3.0},
-            {"id": "GC", "ticker": "GC=F", "weight": 0.075, "leverage": 3.0},
+            {"id": "VWRA.L", "ticker": "VWRA.L", "weight": 0.30, "leverage": 3.0},
+            {"id": "VGLT", "ticker": "VGLT", "weight": 0.40, "leverage": 3.0},
+            {"id": "IEF", "ticker": "IEF", "weight": 0.15, "leverage": 3.0},
+            {"id": "GLD", "ticker": "GLD", "weight": 0.075, "leverage": 3.0},
             {"id": "PDBC", "ticker": "PDBC", "weight": 0.075, "leverage": 3.0},
         ],
     },
     {
         "name": "GOLDEN_BUTTERFLY",
         "assets": [
-            {"id": "VWCE", "ticker": "VWCE.MI", "weight": 0.20, "leverage": 1.0},
-            {"id": "EMUL", "ticker": "EMUL.MI", "weight": 0.20, "leverage": 1.0},
-            {"id": "UTHY", "ticker": "UTHY", "weight": 0.20, "leverage": 1.0},
-            {"id": "GOVT", "ticker": "GOVT", "weight": 0.20, "leverage": 1.0},
-            {"id": "GC", "ticker": "GC=F", "weight": 0.20, "leverage": 1.0},
+            {"id": "VWRA.L", "ticker": "VWRA.L", "weight": 0.20, "leverage": 1.0},
+            {"id": "AVUV", "ticker": "AVUV", "weight": 0.20, "leverage": 1.0},
+            {"id": "VGLT", "ticker": "VGLT", "weight": 0.20, "leverage": 1.0},
+            {"id": "VGSH", "ticker": "VGSH", "weight": 0.20, "leverage": 1.0},
+            {"id": "GLD", "ticker": "GLD", "weight": 0.20, "leverage": 1.0},
         ],
     },
     {
         "name": "GOLDEN_BUTTERFLY_x2_mixed",
         "assets": [
-            {"id": "VWCE", "ticker": "VWCE.MI", "weight": 0.20, "leverage": 2.0},
-            {"id": "EMUL", "ticker": "EMUL.MI", "weight": 0.20, "leverage": 2.0},
-            {"id": "UTHY", "ticker": "UTHY", "weight": 0.20, "leverage": 2.0},
-            {"id": "GOVT", "ticker": "GOVT", "weight": 0.20, "leverage": 1.0},
-            {"id": "GC", "ticker": "GC=F", "weight": 0.20, "leverage": 1.0},
+            {"id": "VWRA.L", "ticker": "VWRA.L", "weight": 0.20, "leverage": 2.0},
+            {"id": "AVUV", "ticker": "AVUV", "weight": 0.20, "leverage": 2.0},
+            {"id": "VGLT", "ticker": "VGLT", "weight": 0.20, "leverage": 2.0},
+            {"id": "VGSH", "ticker": "VGSH", "weight": 0.20, "leverage": 1.0},
+            {"id": "GLD", "ticker": "GLD", "weight": 0.20, "leverage": 1.0},
         ],
     },
 ]
