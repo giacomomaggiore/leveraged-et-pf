@@ -272,138 +272,14 @@ def _validate_target_weights(target_weights: Mapping[str, float], valid_asset_id
         raise ValueError(f"target_weights contains unknown asset ids: {missing_str}")
 
 
-def _build_historical_asset_returns(config: SimulationConfig) -> tuple[pd.DataFrame, pd.Series]:
-    """Create the historical return panel used as Monte Carlo input."""
-    #  validate that asset definitions are structurally sound.
-    _validate_assets(config.assets)
-
-    # Collect only the base market tickers needed to build all configured assets.
-    base_tickers: set[str] = set()
-    
-    # insert in base_tickers the tickers of all spot assets 
-    # and the underlying tickers of all synthetic LETF assets
-    for asset in config.assets:
-        if isinstance(asset, SpotAssetConfig):
-            base_tickers.add(asset.ticker)
-        elif isinstance(asset, SyntheticLETFAssetConfig):
-            base_tickers.add(asset.underlying_ticker)
-    
-    print("Base tickers needed for historical data:")
-    print(base_tickers)
-
-    
-    base_returns, daily_rate = load_market_data(
-        tickers=sorted(base_tickers),
-        fred_series=config.market.fred_series,
-        start=config.market.start,
-        end=config.market.end,
-        fred_is_percent=config.market.fred_is_percent,
-    )
-
-    # Keep only the overlapping window where both returns and borrowing rate exist.
-    # This avoids leading NaNs for rate series that start later than asset history
-    # (e.g., SOFR starts in 2018 while SPY/TLT data may start much earlier).
-    overlap_mask = daily_rate.notna()
-    if not overlap_mask.any():
-        raise ValueError(
-            "Selected rate series has no valid observations in the requested date range."
-        )
-
-    
-    base_returns = base_returns.loc[overlap_mask]
-    daily_rate = daily_rate.loc[overlap_mask]
-
-    # Remove invalid rows so downstream simulations receive clean numeric data.
-    base_returns = base_returns.replace([np.inf, -np.inf], np.nan).dropna(how="any")
-    daily_rate = daily_rate.reindex(base_returns.index).ffill()
-
-
-    #check for empty
-    if base_returns.empty:
-        raise ValueError(
-            "No overlapping asset-return/rate history after alignment. "
-            "Use a different rate series or a later start date."
-        )
-
-    #empty dict 
-    asset_return_series: dict[str, pd.Series] = {}
-    for asset in config.assets:
-        # spot asset - just rename the base return series to the asset id and add to the dict
-        if isinstance(asset, SpotAssetConfig):
-            if asset.ticker not in base_returns.columns:
-                raise ValueError(f"Missing returns for spot ticker '{asset.ticker}'.")
-            s = base_returns[asset.ticker].copy()
-            s.name = asset.id
-            asset_return_series[asset.id] = s
-            # is spot etf= skip the following logic and goes to the second one
-            continue
-
-        if asset.underlying_ticker not in base_returns.columns:
-            raise ValueError(
-                f"Missing returns for LETF underlying ticker '{asset.underlying_ticker}'."
-            )
-
-        # Build synthetic LETF returns from underlying returns and financing costs.
-        letf_returns = synthetic_letf_daily_returns(
-            #call leveraged etf function to compute the daily leverage returns 
-            underlying_returns=base_returns[asset.underlying_ticker],
-            leverage=asset.leverage,
-            ter=asset.ter,
-            borrowing_rate=daily_rate,
-            spread=asset.spread,
-            borrowing_rate_is_annual=False,
-        )
-        letf_returns.name = asset.id
-        asset_return_series[asset.id] = letf_returns
-
-
-    #build historical returns asset with both spot and synthetic etf returns
-    historical_asset_returns = pd.concat(asset_return_series.values(), axis=1)
-    # Final cleanup in case synthetic series introduced any non-finite values.
-    #replace inf values 
-    historical_asset_returns = historical_asset_returns.replace([np.inf, -np.inf], np.nan).dropna(how="any")
-
-
-    #check! 
-    if historical_asset_returns.empty:
-        raise ValueError("No aligned historical returns available for selected assets.")
-
-    daily_rate = daily_rate.reindex(historical_asset_returns.index).ffill()
-    if daily_rate.isna().any():
-        raise ValueError("Daily rate could not be aligned to historical asset returns.")
-
-    return historical_asset_returns, daily_rate
-
-
-def run_complete_simulation(
+def _evaluate_portfolio_from_simulated_returns(
+    *,
     config: SimulationConfig,
-    shared_bootstrap_uniforms: np.ndarray | None = None,
+    historical_asset_returns: pd.DataFrame,
+    daily_rate: pd.Series,
+    simulated: np.ndarray,
 ) -> CompleteSimulationResult:
-    """Run data loading, LETF construction, Monte Carlo, portfolio simulation, and metrics.
-
-    This is the one-call orchestration API intended for main.ipynb usage.
-    """
-    _validate_assets(config.assets)
-
-    # Validate that portfolio weights reference known assets.
-    asset_ids = {asset.id for asset in config.assets}
-    _validate_target_weights(config.portfolio.target_weights, valid_asset_ids=asset_ids)
-
-    # Build the clean historical dataset used as input for path generation.
-    historical_asset_returns, daily_rate = _build_historical_asset_returns(config)
-
-    # Generate simulated daily asset returns across all paths and horizon days.
-    simulated = simulate_monte_carlo(
-        historical_returns=historical_asset_returns,
-        n_paths=config.monte_carlo.n_paths,
-        horizon_days=config.monte_carlo.horizon_days,
-        method=config.monte_carlo.method,
-        distribution=config.monte_carlo.distribution,
-        student_t_df=config.monte_carlo.student_t_df,
-        seed=config.monte_carlo.seed,
-        shared_uniforms=shared_bootstrap_uniforms,
-    )
-
+    """Evaluate one portfolio using already prepared/simulated asset-return inputs."""
     # Reorder weights to match the exact column order expected by the simulator.
     ordered_weights = {
         col: float(config.portfolio.target_weights[col])
@@ -443,4 +319,223 @@ def run_complete_simulation(
         simulated_asset_returns=simulated,
         portfolio=portfolio_result,
         metrics=metrics_result,
+    )
+
+
+def _build_historical_asset_returns_from_market_and_assets(
+    market: MarketDataConfig,
+    assets: list[AssetConfig],
+) -> tuple[pd.DataFrame, pd.Series]:
+    """Build historical return panel from market settings plus an asset universe."""
+    #  validate that asset definitions are structurally sound.
+    _validate_assets(assets)
+
+    # Collect only the base market tickers needed to build all configured assets.
+    base_tickers: set[str] = set()
+
+    # insert in base_tickers the tickers of all spot assets
+    # and the underlying tickers of all synthetic LETF assets
+    for asset in assets:
+        if isinstance(asset, SpotAssetConfig):
+            base_tickers.add(asset.ticker)
+        elif isinstance(asset, SyntheticLETFAssetConfig):
+            base_tickers.add(asset.underlying_ticker)
+
+    print("Base tickers needed for historical data:")
+    print(base_tickers)
+
+    base_returns, daily_rate = load_market_data(
+        tickers=sorted(base_tickers),
+        fred_series=market.fred_series,
+        start=market.start,
+        end=market.end,
+        fred_is_percent=market.fred_is_percent,
+    )
+
+    # Keep only the overlapping window where both returns and borrowing rate exist.
+    # This avoids leading NaNs for rate series that start later than asset history
+    # (e.g., SOFR starts in 2018 while SPY/TLT data may start much earlier).
+    overlap_mask = daily_rate.notna()
+    if not overlap_mask.any():
+        raise ValueError(
+            "Selected rate series has no valid observations in the requested date range."
+        )
+
+    base_returns = base_returns.loc[overlap_mask]
+    daily_rate = daily_rate.loc[overlap_mask]
+
+    # Remove invalid rows so downstream simulations receive clean numeric data.
+    base_returns = base_returns.replace([np.inf, -np.inf], np.nan).dropna(how="any")
+    daily_rate = daily_rate.reindex(base_returns.index).ffill()
+
+    #check for empty
+    if base_returns.empty:
+        raise ValueError(
+            "No overlapping asset-return/rate history after alignment. "
+            "Use a different rate series or a later start date."
+        )
+
+    #empty dict
+    asset_return_series: dict[str, pd.Series] = {}
+    for asset in assets:
+        # spot asset - just rename the base return series to the asset id and add to the dict
+        if isinstance(asset, SpotAssetConfig):
+            if asset.ticker not in base_returns.columns:
+                raise ValueError(f"Missing returns for spot ticker '{asset.ticker}'.")
+            s = base_returns[asset.ticker].copy()
+            s.name = asset.id
+            asset_return_series[asset.id] = s
+            # is spot etf= skip the following logic and goes to the second one
+            continue
+
+        if asset.underlying_ticker not in base_returns.columns:
+            raise ValueError(
+                f"Missing returns for LETF underlying ticker '{asset.underlying_ticker}'."
+            )
+
+        # Build synthetic LETF returns from underlying returns and financing costs.
+        letf_returns = synthetic_letf_daily_returns(
+            #call leveraged etf function to compute the daily leverage returns
+            underlying_returns=base_returns[asset.underlying_ticker],
+            leverage=asset.leverage,
+            ter=asset.ter,
+            borrowing_rate=daily_rate,
+            spread=asset.spread,
+            borrowing_rate_is_annual=False,
+        )
+        letf_returns.name = asset.id
+        asset_return_series[asset.id] = letf_returns
+
+    #build historical returns asset with both spot and synthetic etf returns
+    historical_asset_returns = pd.concat(asset_return_series.values(), axis=1)
+    # Final cleanup in case synthetic series introduced any non-finite values.
+    #replace inf values
+    historical_asset_returns = historical_asset_returns.replace([np.inf, -np.inf], np.nan).dropna(how="any")
+
+    #check!
+    if historical_asset_returns.empty:
+        raise ValueError("No aligned historical returns available for selected assets.")
+
+    daily_rate = daily_rate.reindex(historical_asset_returns.index).ffill()
+    if daily_rate.isna().any():
+        raise ValueError("Daily rate could not be aligned to historical asset returns.")
+
+    return historical_asset_returns, daily_rate
+
+
+def build_historical_asset_returns(
+    *,
+    market: MarketDataConfig,
+    assets: list[AssetConfig],
+) -> tuple[pd.DataFrame, pd.Series]:
+    """Public API to build historical returns once for a shared asset universe."""
+    return _build_historical_asset_returns_from_market_and_assets(market=market, assets=assets)
+
+
+def evaluate_portfolio_on_precomputed_simulation(
+    *,
+    config: SimulationConfig,
+    shared_historical_asset_returns: pd.DataFrame,
+    shared_daily_rate: pd.Series,
+    shared_simulated_asset_returns: np.ndarray,
+    asset_source_columns: Mapping[str, str] | None = None,
+) -> CompleteSimulationResult:
+    """Evaluate one portfolio from shared historical/simulated market scenario artifacts."""
+    _validate_assets(config.assets)
+
+    # Validate that portfolio weights reference known assets.
+    asset_ids = {asset.id for asset in config.assets}
+    _validate_target_weights(config.portfolio.target_weights, valid_asset_ids=asset_ids)
+
+    if shared_historical_asset_returns.empty:
+        raise ValueError("shared_historical_asset_returns cannot be empty.")
+
+    shared_simulated = np.asarray(shared_simulated_asset_returns, dtype=float)
+    if shared_simulated.ndim != 3:
+        raise ValueError("shared_simulated_asset_returns must have shape (paths, time, assets).")
+    if shared_simulated.shape[2] != shared_historical_asset_returns.shape[1]:
+        raise ValueError(
+            "Asset dimension mismatch between shared_simulated_asset_returns and "
+            "shared_historical_asset_returns columns."
+        )
+
+    column_to_index = {
+        str(col): idx for idx, col in enumerate(shared_historical_asset_returns.columns)
+    }
+
+    source_map = dict(asset_source_columns or {})
+    historical_series: list[pd.Series] = []
+    per_asset_sims: list[np.ndarray] = []
+
+    for asset in config.assets:
+        source_col = str(source_map.get(asset.id, asset.id))
+        if source_col not in shared_historical_asset_returns.columns:
+            raise ValueError(
+                f"Missing shared historical column '{source_col}' for asset id '{asset.id}'."
+            )
+
+        s = shared_historical_asset_returns[source_col].copy()
+        s.name = asset.id
+        historical_series.append(s)
+
+        idx = column_to_index[source_col]
+        per_asset_sims.append(shared_simulated[:, :, idx : idx + 1])
+
+    historical_asset_returns = pd.concat(historical_series, axis=1)
+    simulated = np.concatenate(per_asset_sims, axis=2)
+
+    daily_rate = shared_daily_rate.reindex(historical_asset_returns.index).ffill()
+    if daily_rate.isna().any():
+        raise ValueError("Daily rate could not be aligned to historical asset returns.")
+
+    return _evaluate_portfolio_from_simulated_returns(
+        config=config,
+        historical_asset_returns=historical_asset_returns,
+        daily_rate=daily_rate,
+        simulated=simulated,
+    )
+
+
+def _build_historical_asset_returns(config: SimulationConfig) -> tuple[pd.DataFrame, pd.Series]:
+    """Create the historical return panel used as Monte Carlo input."""
+    return _build_historical_asset_returns_from_market_and_assets(
+        market=config.market,
+        assets=config.assets,
+    )
+
+
+def run_complete_simulation(
+    config: SimulationConfig,
+    shared_bootstrap_uniforms: np.ndarray | None = None,
+) -> CompleteSimulationResult:
+    """Run data loading, LETF construction, Monte Carlo, portfolio simulation, and metrics.
+
+    This is the one-call orchestration API intended for main.ipynb usage.
+    """
+    _validate_assets(config.assets)
+
+    # Validate that portfolio weights reference known assets.
+    asset_ids = {asset.id for asset in config.assets}
+    _validate_target_weights(config.portfolio.target_weights, valid_asset_ids=asset_ids)
+
+    # Build the clean historical dataset used as input for path generation.
+    historical_asset_returns, daily_rate = _build_historical_asset_returns(config)
+
+    # Generate simulated daily asset returns across all paths and horizon days.
+    simulated = simulate_monte_carlo(
+        historical_returns=historical_asset_returns,
+        n_paths=config.monte_carlo.n_paths,
+        horizon_days=config.monte_carlo.horizon_days,
+        method=config.monte_carlo.method,
+        distribution=config.monte_carlo.distribution,
+        student_t_df=config.monte_carlo.student_t_df,
+        seed=config.monte_carlo.seed,
+        shared_uniforms=shared_bootstrap_uniforms,
+    )
+
+    return _evaluate_portfolio_from_simulated_returns(
+        config=config,
+        historical_asset_returns=historical_asset_returns,
+        daily_rate=daily_rate,
+        simulated=simulated,
     )

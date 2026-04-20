@@ -17,9 +17,11 @@ from orchestration import (
     SpotAssetConfig,
     SyntheticLETFAssetConfig,
     _canonical_portfolio_name,
-    run_complete_simulation,
+    build_historical_asset_returns,
+    evaluate_portfolio_on_precomputed_simulation,
     save_portfolio_metrics_summary,
 )
+from montecarlo import simulate_monte_carlo
 from visuals import plot_spaghetti_paths, plot_terminal_wealth_distribution
 
 
@@ -32,6 +34,23 @@ AGGREGATE_CSV = OUTPUT_DIR / "portfolio_metrics_summary.csv"
 def _slugify(text: str) -> str:
     slug = re.sub(r"[^a-zA-Z0-9]+", "-", text).strip("-").lower()
     return slug or "portfolio"
+
+
+def _cleanup_legacy_exports(per_portfolio_dir: Path) -> None:
+    """Remove old plot artifacts from previous export layouts, if present."""
+    legacy_names = [
+        "spaghetti.png",
+        "terminal-distribution.png",
+        "terminal-wealth-distribution.png",
+        "montecarlo-spaghetti.png",
+        "summary.png",
+        "mc-simulation-summary.html",
+    ]
+
+    for name in legacy_names:
+        path = per_portfolio_dir / name
+        if path.exists() and path.is_file():
+            path.unlink()
 
 
 def _build_assets_and_weights(definitions: list[dict]) -> tuple[list[SpotAssetConfig | SyntheticLETFAssetConfig], dict[str, float]]:
@@ -129,6 +148,77 @@ def _build_assets_subtitle(config: SimulationConfig) -> str:
                 f"TER={asset.ter:.2%} | spread={asset.spread:.2%}"
             )
     return "<br>".join(rows)
+
+
+def _asset_signature(asset: SpotAssetConfig | SyntheticLETFAssetConfig) -> tuple:
+    """Build a deterministic signature for one return stream definition."""
+    if isinstance(asset, SpotAssetConfig):
+        return ("spot", str(asset.ticker).upper())
+    return (
+        "synthetic_letf",
+        str(asset.underlying_ticker).upper(),
+        float(asset.leverage),
+        float(asset.ter),
+        float(asset.spread),
+    )
+
+
+def _build_shared_asset_universe(
+    configs: list[SimulationConfig],
+) -> tuple[list[SpotAssetConfig | SyntheticLETFAssetConfig], list[dict[str, str]]]:
+    """Create a shared asset universe and per-portfolio map from local ids to shared ids."""
+    signature_to_shared_id: dict[tuple, str] = {}
+    shared_assets: list[SpotAssetConfig | SyntheticLETFAssetConfig] = []
+    per_portfolio_source_map: list[dict[str, str]] = []
+
+    for config in configs:
+        source_map: dict[str, str] = {}
+
+        for asset in config.assets:
+            signature = _asset_signature(asset)
+            shared_id = signature_to_shared_id.get(signature)
+
+            if shared_id is None:
+                shared_id = f"shared_asset_{len(shared_assets) + 1:03d}"
+                signature_to_shared_id[signature] = shared_id
+
+                if isinstance(asset, SpotAssetConfig):
+                    shared_assets.append(SpotAssetConfig(id=shared_id, ticker=asset.ticker))
+                else:
+                    shared_assets.append(
+                        SyntheticLETFAssetConfig(
+                            id=shared_id,
+                            underlying_ticker=asset.underlying_ticker,
+                            leverage=asset.leverage,
+                            ter=asset.ter,
+                            spread=asset.spread,
+                        )
+                    )
+
+            source_map[asset.id] = shared_id
+
+        per_portfolio_source_map.append(source_map)
+
+    return shared_assets, per_portfolio_source_map
+
+
+def _validate_shared_batch_inputs(configs: list[SimulationConfig]) -> None:
+    """Ensure all portfolios can be evaluated on one common market scenario."""
+    if not configs:
+        raise ValueError("No portfolio configurations provided.")
+
+    first = configs[0]
+    for idx, cfg in enumerate(configs[1:], start=2):
+        if cfg.market != first.market:
+            raise ValueError(
+                f"Portfolio #{idx} has different market data settings. "
+                "All portfolios must share the same market config in shared-scenario mode."
+            )
+        if cfg.monte_carlo != first.monte_carlo:
+            raise ValueError(
+                f"Portfolio #{idx} has different Monte Carlo settings. "
+                "All portfolios must share the same Monte Carlo config in shared-scenario mode."
+            )
 
 
 
@@ -518,44 +608,54 @@ def run_batch() -> None:
     if not PORTFOLIOS:
         raise ValueError("PORTFOLIOS is empty.")
 
-    first_assets, first_weights = _build_assets_and_weights(PORTFOLIOS[0]["assets"])
-    first_config = _base_config(first_assets, first_weights)
-
-    if first_config.monte_carlo.method != "bootstrap":
-        raise ValueError(
-            "run_batch shared-simulation mode currently supports only bootstrap Monte Carlo."
-        )
-
-    shared_rng = np.random.default_rng(first_config.monte_carlo.seed)
-    shared_bootstrap_uniforms = shared_rng.random(
-        (
-            first_config.monte_carlo.n_paths,
-            first_config.monte_carlo.horizon_days,
-        )
-    )
-
-    for idx, portfolio in enumerate(PORTFOLIOS, start=1):
+    portfolio_names: list[str] = []
+    configs: list[SimulationConfig] = []
+    for portfolio in PORTFOLIOS:
         name = str(portfolio["name"])
         definitions = portfolio["assets"]
+        assets, target_weights = _build_assets_and_weights(definitions)
+        config = _base_config(assets, target_weights)
+        portfolio_names.append(name)
+        configs.append(config)
+
+    _validate_shared_batch_inputs(configs)
+
+    first_config = configs[0]
+    shared_assets, per_portfolio_source_map = _build_shared_asset_universe(configs)
+
+    print(
+        "Building shared historical scenario "
+        f"for {len(shared_assets)} unique return streams across {len(configs)} portfolios..."
+    )
+    shared_historical_returns, shared_daily_rate = build_historical_asset_returns(
+        market=first_config.market,
+        assets=shared_assets,
+    )
+
+    print("Running one shared Monte Carlo simulation for all portfolios...")
+    shared_simulated_returns = simulate_monte_carlo(
+        historical_returns=shared_historical_returns,
+        n_paths=first_config.monte_carlo.n_paths,
+        horizon_days=first_config.monte_carlo.horizon_days,
+        method=first_config.monte_carlo.method,
+        distribution=first_config.monte_carlo.distribution,
+        student_t_df=first_config.monte_carlo.student_t_df,
+        seed=first_config.monte_carlo.seed,
+    )
+
+    for idx, (name, config, source_map) in enumerate(
+        zip(portfolio_names, configs, per_portfolio_source_map),
+        start=1,
+    ):
 
         print(f"[{idx}/{len(PORTFOLIOS)}] Running: {name}")
 
-        assets, target_weights = _build_assets_and_weights(definitions)
-        config = _base_config(assets, target_weights)
-        if config.monte_carlo.method != "bootstrap":
-            raise ValueError(
-                "All portfolios must use bootstrap Monte Carlo in shared-simulation mode."
-            )
-        if (
-            config.monte_carlo.n_paths != first_config.monte_carlo.n_paths
-            or config.monte_carlo.horizon_days != first_config.monte_carlo.horizon_days
-        ):
-            raise ValueError(
-                "All portfolios must use the same n_paths and horizon_days in shared-simulation mode."
-            )
-        result = run_complete_simulation(
-            config,
-            shared_bootstrap_uniforms=shared_bootstrap_uniforms,
+        result = evaluate_portfolio_on_precomputed_simulation(
+            config=config,
+            shared_historical_asset_returns=shared_historical_returns,
+            shared_daily_rate=shared_daily_rate,
+            shared_simulated_asset_returns=shared_simulated_returns,
+            asset_source_columns=source_map,
         )
 
         # 1) Upsert row in global /output_2/portfolio_metrics_summary.csv

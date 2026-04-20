@@ -1,4 +1,5 @@
 yfinance
+defeatbeta-api
 pandas-datareader
 numpy
 pandas
