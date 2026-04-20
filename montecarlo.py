@@ -99,6 +99,7 @@ def simulate_bootstrap_paths(
     n_paths: int,
     horizon_days: int,
     seed: int | None = None,
+    shared_uniforms: np.ndarray | None = None,
 ) -> np.ndarray:
     
     """Sample full historical daily rows with replacement (default method)."""
@@ -108,11 +109,24 @@ def simulate_bootstrap_paths(
         raise ValueError("n_paths and horizon_days must be positive integers.")
 
 
-    rng = np.random.default_rng(seed)
     values = clean.to_numpy()
     n_hist_days = values.shape[0]
 
-    sampled_idx = rng.integers(0, n_hist_days, size=(n_paths, horizon_days))
+    if shared_uniforms is not None:
+        uniforms = np.asarray(shared_uniforms, dtype=float)
+        if uniforms.shape != (n_paths, horizon_days):
+            raise ValueError(
+                "shared_uniforms must have shape (n_paths, horizon_days)."
+            )
+        if not np.isfinite(uniforms).all():
+            raise ValueError("shared_uniforms contains NaN or inf values.")
+
+        clipped = np.clip(uniforms, 0.0, np.nextafter(1.0, 0.0))
+        sampled_idx = np.floor(clipped * n_hist_days).astype(int)
+    else:
+        rng = np.random.default_rng(seed)
+        sampled_idx = rng.integers(0, n_hist_days, size=(n_paths, horizon_days))
+
     simulated = values[sampled_idx]
     return simulated
 
@@ -125,6 +139,7 @@ def simulate_monte_carlo(
     distribution: Literal["normal", "student_t"] = "normal",
     student_t_df: float = 6.0,
     seed: int | None = None,
+    shared_uniforms: np.ndarray | None = None,
 ) -> np.ndarray:
     """Main API returning simulated paths with shape (paths, time, assets)."""
     selected_method = method.lower()
@@ -135,6 +150,7 @@ def simulate_monte_carlo(
             n_paths=n_paths,
             horizon_days=horizon_days,
             seed=seed,
+            shared_uniforms=shared_uniforms,
         )
 
     if selected_method == "parametric":

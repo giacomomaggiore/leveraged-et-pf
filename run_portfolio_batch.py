@@ -131,20 +131,6 @@ def _build_assets_subtitle(config: SimulationConfig) -> str:
     return "<br>".join(rows)
 
 
-def _cleanup_legacy_exports(output_dir: Path) -> None:
-    legacy_files = [
-        "spaghetti.png",
-        "spaghetti.html",
-        "terminal_distribution.png",
-        "terminal_distribution.html",
-        "drawdown.png",
-        "drawdown.html",
-        "metrics_summary_table.csv",
-    ]
-    for filename in legacy_files:
-        path = output_dir / filename
-        if path.exists():
-            path.unlink()
 
 
 def _export_figures(
@@ -529,6 +515,25 @@ PORTFOLIOS = [
 def run_batch() -> None:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
+    if not PORTFOLIOS:
+        raise ValueError("PORTFOLIOS is empty.")
+
+    first_assets, first_weights = _build_assets_and_weights(PORTFOLIOS[0]["assets"])
+    first_config = _base_config(first_assets, first_weights)
+
+    if first_config.monte_carlo.method != "bootstrap":
+        raise ValueError(
+            "run_batch shared-simulation mode currently supports only bootstrap Monte Carlo."
+        )
+
+    shared_rng = np.random.default_rng(first_config.monte_carlo.seed)
+    shared_bootstrap_uniforms = shared_rng.random(
+        (
+            first_config.monte_carlo.n_paths,
+            first_config.monte_carlo.horizon_days,
+        )
+    )
+
     for idx, portfolio in enumerate(PORTFOLIOS, start=1):
         name = str(portfolio["name"])
         definitions = portfolio["assets"]
@@ -537,7 +542,21 @@ def run_batch() -> None:
 
         assets, target_weights = _build_assets_and_weights(definitions)
         config = _base_config(assets, target_weights)
-        result = run_complete_simulation(config)
+        if config.monte_carlo.method != "bootstrap":
+            raise ValueError(
+                "All portfolios must use bootstrap Monte Carlo in shared-simulation mode."
+            )
+        if (
+            config.monte_carlo.n_paths != first_config.monte_carlo.n_paths
+            or config.monte_carlo.horizon_days != first_config.monte_carlo.horizon_days
+        ):
+            raise ValueError(
+                "All portfolios must use the same n_paths and horizon_days in shared-simulation mode."
+            )
+        result = run_complete_simulation(
+            config,
+            shared_bootstrap_uniforms=shared_bootstrap_uniforms,
+        )
 
         # 1) Upsert row in global /output_2/portfolio_metrics_summary.csv
         save_portfolio_metrics_summary(

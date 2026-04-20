@@ -375,7 +375,10 @@ def _build_historical_asset_returns(config: SimulationConfig) -> tuple[pd.DataFr
     return historical_asset_returns, daily_rate
 
 
-def run_complete_simulation(config: SimulationConfig) -> CompleteSimulationResult:
+def run_complete_simulation(
+    config: SimulationConfig,
+    shared_bootstrap_uniforms: np.ndarray | None = None,
+) -> CompleteSimulationResult:
     """Run data loading, LETF construction, Monte Carlo, portfolio simulation, and metrics.
 
     This is the one-call orchestration API intended for main.ipynb usage.
@@ -398,6 +401,7 @@ def run_complete_simulation(config: SimulationConfig) -> CompleteSimulationResul
         distribution=config.monte_carlo.distribution,
         student_t_df=config.monte_carlo.student_t_df,
         seed=config.monte_carlo.seed,
+        shared_uniforms=shared_bootstrap_uniforms,
     )
 
     # Reorder weights to match the exact column order expected by the simulator.
