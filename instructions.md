@@ -24,7 +24,7 @@ The goal of this project is to build a modular, highly accurate quantitative sim
 
 ### 3.1 Data Acquisition (`data_loader.py`)
 *   **Equities/Bonds:** Use `yfinance` to download daily adjusted close prices (`Adj Close`). Calculate daily simple returns. Keep modular (accept any list of tickers).
-*   **Borrowing Costs/Swap Rates:** Use `pandas-datareader` to query the FRED database (e.g., SOFR, Fed Funds, or historical proxies).
+*   **Borrowing Costs/Swap Rates:** Use `pandas-datareader` to query the FRED database (e.g., EFFR, Fed Funds, or historical proxies).
 *   **Data Alignment:** Use a **trading-days-only** datetime index (no weekend/holiday rows). Align all series on trading days; forward-fill only where needed on trading-day gaps after merge.
 *   **Rate Conversion Convention:** Convert annualized rates to daily using **252 trading days**.
 

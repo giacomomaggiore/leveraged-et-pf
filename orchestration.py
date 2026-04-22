@@ -142,7 +142,7 @@ class MarketDataConfig:
 
     start: str
     end: str
-    fred_series: str = "SOFR"
+    fred_series: str = "EFFR"
     fred_is_percent: bool = True
 
 
@@ -354,7 +354,7 @@ def _build_historical_asset_returns_from_market_and_assets(
 
     # Keep only the overlapping window where both returns and borrowing rate exist.
     # This avoids leading NaNs for rate series that start later than asset history
-    # (e.g., SOFR starts in 2018 while SPY/TLT data may start much earlier).
+    # (e.g., EFFR starts later than SPY/TLT data in long backtests).
     overlap_mask = daily_rate.notna()
     if not overlap_mask.any():
         raise ValueError(

@@ -386,7 +386,7 @@ def download_adj_close_prices(
 		warnings.warn(
 			(
 				"Yahoo Finance batch response returned no usable rows for all uncached symbols. "
-				"Likely temporary provider throttling; skipping repeated per-ticker Yahoo calls."
+				"Likely temporary provider throttling; retrying per ticker with backoff."
 			),
 			RuntimeWarning,
 		)
@@ -395,29 +395,19 @@ def download_adj_close_prices(
 	for symbol in missing_symbols:
 		fetch_start = online_start_by_symbol[symbol]
 		if likely_batch_provider_failure:
-			defeatbeta_series = _download_from_defeatbeta(symbol=symbol, start=fetch_start, end=end_ts)
-			if defeatbeta_series is not None and not defeatbeta_series.empty:
-				warnings.warn(
-					f"Recovered {symbol} via defeatbeta_api after Yahoo batch failure.",
-					RuntimeWarning,
-				)
-				fallback_frames.append(defeatbeta_series.to_frame(name=symbol))
-				_save_cached_symbol_prices(symbol=symbol, series=defeatbeta_series)
-				continue
-			warnings.warn(
-				f"defeatbeta_api returned no usable rows for {symbol}.",
-				RuntimeWarning,
+			# Stagger per-ticker retry attempts when the initial batch is throttled.
+			cooldown_s = min(
+				YF_MAX_BACKOFF_SECONDS,
+				YF_BASE_BACKOFF_SECONDS * 3 + random.uniform(0.0, YF_BASE_BACKOFF_SECONDS * 2),
 			)
-
 			warnings.warn(
 				(
-					f"No fallback data source could recover {symbol} after Yahoo batch failure "
-					"(tried defeatbeta_api only). "
-					"Try again later or provide a local cache CSV in data/."
+					f"Waiting {cooldown_s:.1f}s before per-ticker Yahoo retry for {symbol} "
+					"after batch provider failure."
 				),
 				RuntimeWarning,
 			)
-			continue
+			time.sleep(cooldown_s)
 
 		try:
 			single_raw = _yf_download_with_retries(tickers=[symbol], start=fetch_start, end=yf_end_ts)
@@ -645,7 +635,7 @@ def fetch_fred_annual_rate(
 ) -> pd.Series:
 	"""Fetch a FRED annualized rate time series.
 
-	Examples of series ids: 'SOFR', 'DFF', 'DTB3'.
+	Examples of series ids: 'EFFR', 'DFF', 'DTB3'.
 	"""
 	if not str(fred_series).strip():
 		raise ValueError("fred_series must be a non-empty string.")

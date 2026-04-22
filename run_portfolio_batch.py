@@ -31,6 +31,32 @@ OUTPUT_DIR = Path("output")
 AGGREGATE_CSV = OUTPUT_DIR / "portfolio_metrics_summary.csv"
 
 
+def _resolve_largest_market_window(
+    assets: list[SpotAssetConfig | SyntheticLETFAssetConfig],
+    *,
+    fred_series: str = "EFFR",
+    fred_is_percent: bool = True,
+) -> tuple[str, str]:
+    """Return the widest aligned historical window available for the given assets."""
+    max_end = pd.Timestamp.today().strftime("%Y-%m-%d")
+    historical_returns, _ = build_historical_asset_returns(
+        market=MarketDataConfig(
+            start="1900-01-01",
+            end=max_end,
+            fred_series=fred_series,
+            fred_is_percent=fred_is_percent,
+        ),
+        assets=assets,
+    )
+
+    if historical_returns.empty:
+        raise ValueError("No historical data available to infer start/end date window.")
+
+    start = pd.Timestamp(historical_returns.index.min()).strftime("%Y-%m-%d")
+    end = pd.Timestamp(historical_returns.index.max()).strftime("%Y-%m-%d")
+    return start, end
+
+
 def _slugify(text: str) -> str:
     slug = re.sub(r"[^a-zA-Z0-9]+", "-", text).strip("-").lower()
     return slug or "portfolio"
@@ -90,12 +116,30 @@ def _build_assets_and_weights(definitions: list[dict]) -> tuple[list[SpotAssetCo
     return assets, target_weights
 
 
-def _base_config(assets: list[SpotAssetConfig | SyntheticLETFAssetConfig], target_weights: dict[str, float]) -> SimulationConfig:
+def _base_config(
+    assets: list[SpotAssetConfig | SyntheticLETFAssetConfig],
+    target_weights: dict[str, float],
+    start: str | None = None,
+    end: str | None = None,
+) -> SimulationConfig:
+    resolved_start = start
+    resolved_end = end
+    if resolved_start is None or resolved_end is None:
+        inferred_start, inferred_end = _resolve_largest_market_window(
+            assets,
+            fred_series="EFFR",
+            fred_is_percent=True,
+        )
+        if resolved_start is None:
+            resolved_start = inferred_start
+        if resolved_end is None:
+            resolved_end = inferred_end
+
     return SimulationConfig(
         market=MarketDataConfig(
-            start="2018-04-03",
-            end="2025-12-31",
-            fred_series="SOFR",
+            start=resolved_start,
+            end=resolved_end,
+            fred_series="EFFR",
             fred_is_percent=True,
         ),
         assets=assets,
@@ -505,54 +549,54 @@ def _export_figures(
 
 PORTFOLIOS = [
     {
-        "name": "EQUITY_WORLD_100_VWRA.L",
+        "name": "EQUITY_WORLD_100_VTI",
         "assets": [
-            {"id": "VWRA.L", "ticker": "VWRA.L", "weight": 1.0, "leverage": 1.0},
+            {"id": "VTI", "ticker": "VTI", "weight": 1.0, "leverage": 1.0},
         ],
     },
     {
-        "name": "EQUITY_WORLD_100_VWRA.L_x1_5",
+        "name": "EQUITY_WORLD_100_VTI_x1_5",
         "assets": [
-            {"id": "VWRA.L", "ticker": "VWRA.L", "weight": 1.0, "leverage": 1.5},
+            {"id": "VTI", "ticker": "VTI", "weight": 1.0, "leverage": 1.5},
         ],
     },
     {
-        "name": "EQUITY_WORLD_100_VWRA.L_x2",
+        "name": "EQUITY_WORLD_100_VTI_x2",
         "assets": [
-            {"id": "VWRA.L", "ticker": "VWRA.L", "weight": 1.0, "leverage": 2.0},
+            {"id": "VTI", "ticker": "VTI", "weight": 1.0, "leverage": 2.0},
         ],
     },
     {
-        "name": "EQUITY_WORLD_100_VWRA.L_x3",
+        "name": "EQUITY_WORLD_100_VTI_x3",
         "assets": [
-            {"id": "VWRA.L", "ticker": "VWRA.L", "weight": 1.0, "leverage": 3.0},
+            {"id": "VTI", "ticker": "VTI", "weight": 1.0, "leverage": 3.0},
         ],
     },
     {
         "name": "CLASSIC_60_40",
         "assets": [
-            {"id": "VWRA.L", "ticker": "VWRA.L", "weight": 0.60, "leverage": 1.0},
+            {"id": "VTI", "ticker": "VTI", "weight": 0.60, "leverage": 1.0},
             {"id": "GOVT", "ticker": "GOVT", "weight": 0.40, "leverage": 1.0},
         ],
     },
     {
         "name": "CLASSIC_60_40_x2_x2",
         "assets": [
-            {"id": "VWRA.L", "ticker": "VWRA.L", "weight": 0.60, "leverage": 2.0},
+            {"id": "VTI", "ticker": "VTI", "weight": 0.60, "leverage": 2.0},
             {"id": "GOVT", "ticker": "GOVT", "weight": 0.40, "leverage": 2.0},
         ],
     },
     {
-        "name": "CLASSIC_60_40_VWRA.L_x2_GOVT_spot",
+        "name": "CLASSIC_60_40_VTI_x2_GOVT_spot",
         "assets": [
-            {"id": "VWRA.L", "ticker": "VWRA.L", "weight": 0.60, "leverage": 2.0},
+            {"id": "VTI", "ticker": "VTI", "weight": 0.60, "leverage": 2.0},
             {"id": "GOVT", "ticker": "GOVT", "weight": 0.40, "leverage": 1.0},
         ],
     },
     {
         "name": "ALL_WEATHER",
         "assets": [
-            {"id": "VWRA.L", "ticker": "VWRA.L", "weight": 0.30, "leverage": 1.0},
+            {"id": "VTI", "ticker": "VTI", "weight": 0.30, "leverage": 1.0},
             {"id": "VGLT", "ticker": "VGLT", "weight": 0.40, "leverage": 1.0},
             {"id": "IEF", "ticker": "IEF", "weight": 0.15, "leverage": 1.0},
             {"id": "GLD", "ticker": "GLD", "weight": 0.075, "leverage": 1.0},
@@ -562,7 +606,7 @@ PORTFOLIOS = [
     {
         "name": "ALL_WEATHER_x2",
         "assets": [
-            {"id": "VWRA.L", "ticker": "VWRA.L", "weight": 0.30, "leverage": 2.0},
+            {"id": "VTI", "ticker": "VTI", "weight": 0.30, "leverage": 2.0},
             {"id": "VGLT", "ticker": "VGLT", "weight": 0.40, "leverage": 2.0},
             {"id": "IEF", "ticker": "IEF", "weight": 0.15, "leverage": 2.0},
             {"id": "GLD", "ticker": "GLD", "weight": 0.075, "leverage": 2.0},
@@ -572,7 +616,7 @@ PORTFOLIOS = [
     {
         "name": "ALL_WEATHER_x3",
         "assets": [
-            {"id": "VWRA.L", "ticker": "VWRA.L", "weight": 0.30, "leverage": 3.0},
+            {"id": "VTI", "ticker": "VTI", "weight": 0.30, "leverage": 3.0},
             {"id": "VGLT", "ticker": "VGLT", "weight": 0.40, "leverage": 3.0},
             {"id": "IEF", "ticker": "IEF", "weight": 0.15, "leverage": 3.0},
             {"id": "GLD", "ticker": "GLD", "weight": 0.075, "leverage": 3.0},
@@ -582,8 +626,8 @@ PORTFOLIOS = [
     {
         "name": "GOLDEN_BUTTERFLY",
         "assets": [
-            {"id": "VWRA.L", "ticker": "VWRA.L", "weight": 0.20, "leverage": 1.0},
-            {"id": "AVUV", "ticker": "AVUV", "weight": 0.20, "leverage": 1.0},
+            {"id": "VTI", "ticker": "VTI", "weight": 0.20, "leverage": 1.0},
+            {"id": "VBR", "ticker": "VBR", "weight": 0.20, "leverage": 1.0},
             {"id": "VGLT", "ticker": "VGLT", "weight": 0.20, "leverage": 1.0},
             {"id": "VGSH", "ticker": "VGSH", "weight": 0.20, "leverage": 1.0},
             {"id": "GLD", "ticker": "GLD", "weight": 0.20, "leverage": 1.0},
@@ -592,8 +636,8 @@ PORTFOLIOS = [
     {
         "name": "GOLDEN_BUTTERFLY_x2_mixed",
         "assets": [
-            {"id": "VWRA.L", "ticker": "VWRA.L", "weight": 0.20, "leverage": 2.0},
-            {"id": "AVUV", "ticker": "AVUV", "weight": 0.20, "leverage": 2.0},
+            {"id": "VTI", "ticker": "VTI", "weight": 0.20, "leverage": 2.0},
+            {"id": "VBR", "ticker": "VBR", "weight": 0.20, "leverage": 2.0},
             {"id": "VGLT", "ticker": "VGLT", "weight": 0.20, "leverage": 2.0},
             {"id": "VGSH", "ticker": "VGSH", "weight": 0.20, "leverage": 1.0},
             {"id": "GLD", "ticker": "GLD", "weight": 0.20, "leverage": 1.0},
@@ -609,13 +653,44 @@ def run_batch() -> None:
         raise ValueError("PORTFOLIOS is empty.")
 
     portfolio_names: list[str] = []
-    configs: list[SimulationConfig] = []
+    portfolio_assets: list[list[SpotAssetConfig | SyntheticLETFAssetConfig]] = []
+    portfolio_target_weights: list[dict[str, float]] = []
+
     for portfolio in PORTFOLIOS:
         name = str(portfolio["name"])
         definitions = portfolio["assets"]
         assets, target_weights = _build_assets_and_weights(definitions)
-        config = _base_config(assets, target_weights)
         portfolio_names.append(name)
+        portfolio_assets.append(assets)
+        portfolio_target_weights.append(target_weights)
+
+    placeholder_end = pd.Timestamp.today().strftime("%Y-%m-%d")
+    placeholder_configs = [
+        _base_config(
+            assets,
+            target_weights,
+            start="1900-01-01",
+            end=placeholder_end,
+        )
+        for assets, target_weights in zip(portfolio_assets, portfolio_target_weights)
+    ]
+
+    shared_assets, _ = _build_shared_asset_universe(placeholder_configs)
+    shared_start, shared_end = _resolve_largest_market_window(
+        shared_assets,
+        fred_series="EFFR",
+        fred_is_percent=True,
+    )
+    print(f"Auto-selected shared market window: {shared_start} -> {shared_end}")
+
+    configs: list[SimulationConfig] = []
+    for assets, target_weights in zip(portfolio_assets, portfolio_target_weights):
+        config = _base_config(
+            assets,
+            target_weights,
+            start=shared_start,
+            end=shared_end,
+        )
         configs.append(config)
 
     _validate_shared_batch_inputs(configs)
@@ -623,6 +698,7 @@ def run_batch() -> None:
     first_config = configs[0]
     shared_assets, per_portfolio_source_map = _build_shared_asset_universe(configs)
 
+    
     print(
         "Building shared historical scenario "
         f"for {len(shared_assets)} unique return streams across {len(configs)} portfolios..."
@@ -630,6 +706,14 @@ def run_batch() -> None:
     shared_historical_returns, shared_daily_rate = build_historical_asset_returns(
         market=first_config.market,
         assets=shared_assets,
+    )
+    # Print the historical overlap window used for Monte Carlo sampling.
+    hist_start = pd.Timestamp(shared_historical_returns.index.min()).date()
+    hist_end = pd.Timestamp(shared_historical_returns.index.max()).date()
+    print(
+        "Historical overlap window used for Monte Carlo sampling: "
+        f"{hist_start} -> {hist_end} "
+        f"({shared_historical_returns.shape[0]} trading days)"
     )
 
     print("Running one shared Monte Carlo simulation for all portfolios...")
