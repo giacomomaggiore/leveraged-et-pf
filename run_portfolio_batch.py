@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import re
+import warnings
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+from letf_engine import synthetic_letf_daily_returns
 
 from orchestration import (
     CompleteSimulationResult,
@@ -17,7 +19,6 @@ from orchestration import (
     SpotAssetConfig,
     SyntheticLETFAssetConfig,
     _canonical_portfolio_name,
-    build_historical_asset_returns,
     evaluate_portfolio_on_precomputed_simulation,
     save_portfolio_metrics_summary,
 )
@@ -29,6 +30,198 @@ DEFAULT_TER = 0.0092
 DEFAULT_SPREAD = 0.0030
 OUTPUT_DIR = Path("output")
 AGGREGATE_CSV = OUTPUT_DIR / "portfolio_metrics_summary.csv"
+DATA_DIR = Path(__file__).resolve().parent / "data"
+
+
+def _compute_daily_simple_returns(prices: pd.DataFrame) -> pd.DataFrame:
+    if prices.empty:
+        raise ValueError("Prices DataFrame is empty.")
+    returns = prices.pct_change(fill_method=None)
+    returns = returns.replace([float("inf"), float("-inf")], pd.NA)
+    return returns.dropna(how="all")
+
+
+def _annual_to_daily_rate(annual_rate: pd.Series, is_percent: bool = True) -> pd.Series:
+    if annual_rate.empty:
+        raise ValueError("Annual rate series is empty.")
+    annual_decimal = annual_rate / 100.0 if is_percent else annual_rate
+    daily_rate = annual_decimal / 252.0
+    daily_rate.name = f"{annual_rate.name}_daily"
+    return daily_rate
+
+
+def _cache_filename_for_symbol(symbol: str) -> str:
+    safe = str(symbol).replace("=", "_EQ_").replace("/", "_")
+    return f"{safe}.csv"
+
+
+def _load_local_adj_close_series(symbol: str, start: str, end: str) -> pd.Series | None:
+    csv_path = DATA_DIR / _cache_filename_for_symbol(symbol)
+    if not csv_path.exists():
+        return None
+
+    frame = pd.read_csv(csv_path, index_col=0, parse_dates=True)
+    if "Adj Close" not in frame.columns:
+        return None
+
+    series = pd.to_numeric(frame["Adj Close"], errors="coerce").dropna().sort_index()
+    if series.empty:
+        return None
+
+    start_ts = pd.Timestamp(start)
+    end_ts = pd.Timestamp(end)
+    series = series.loc[(series.index >= start_ts) & (series.index <= end_ts)]
+    if series.empty:
+        return None
+
+    series.name = str(symbol).upper()
+    return series
+
+
+def _load_local_fred_annual_rate(series_id: str, start: str, end: str) -> pd.Series | None:
+    csv_path = DATA_DIR / f"FRED_{_cache_filename_for_symbol(series_id)}"
+    if not csv_path.exists():
+        return None
+
+    frame = pd.read_csv(csv_path)
+    if frame.empty:
+        return None
+
+    date_col = None
+    for candidate in ("DATE", "date", "observation_date", "Observation Date"):
+        if candidate in frame.columns:
+            date_col = candidate
+            break
+    if date_col is None:
+        return None
+
+    value_col = series_id if series_id in frame.columns else frame.columns[-1]
+    values = pd.to_numeric(frame[value_col], errors="coerce")
+    dates = pd.to_datetime(frame[date_col], errors="coerce")
+
+    series = pd.Series(values.values, index=pd.DatetimeIndex(dates), name=series_id)
+    series = series.dropna().sort_index()
+
+    start_ts = pd.Timestamp(start)
+    end_ts = pd.Timestamp(end)
+    series = series.loc[(series.index >= start_ts) & (series.index <= end_ts)]
+    if series.empty:
+        return None
+
+    return series
+
+
+def _warn_missing_dates(label: str, full_index: pd.DatetimeIndex, series_index: pd.DatetimeIndex) -> None:
+    missing = full_index.difference(series_index)
+    if missing.empty:
+        return
+
+    preview_n = 10
+    preview_dates = ", ".join(d.strftime("%Y-%m-%d") for d in missing[:preview_n])
+    suffix = "" if len(missing) <= preview_n else f" ... (+{len(missing) - preview_n} more)"
+    warnings.warn(
+        f"{label}: missing {len(missing)} dates in local data: {preview_dates}{suffix}. "
+        "Proceeding with the largest overlapping window.",
+        RuntimeWarning,
+    )
+
+
+def _build_local_historical_asset_returns(
+    *,
+    market: MarketDataConfig,
+    assets: list[SpotAssetConfig | SyntheticLETFAssetConfig],
+) -> tuple[pd.DataFrame, pd.Series]:
+    base_tickers = sorted(
+        {
+            (asset.ticker if isinstance(asset, SpotAssetConfig) else asset.underlying_ticker)
+            for asset in assets
+        }
+    )
+
+    symbol_prices: dict[str, pd.Series] = {}
+    missing_tickers: list[str] = []
+    for ticker in base_tickers:
+        s = _load_local_adj_close_series(ticker, market.start, market.end)
+        if s is None:
+            missing_tickers.append(ticker)
+            continue
+        symbol_prices[ticker] = s
+
+    if missing_tickers:
+        missing_files = [str(DATA_DIR / _cache_filename_for_symbol(t)) for t in missing_tickers]
+        raise ValueError(
+            "Missing local ticker data for: "
+            f"{missing_tickers}. "
+            "Download them first using download_data.ipynb or main.ipynb. "
+            f"Expected files: {missing_files}"
+        )
+
+    prices = pd.concat([symbol_prices[t] for t in base_tickers], axis=1)
+    prices.columns = base_tickers
+    prices = prices.sort_index()
+    prices = prices[~prices.index.duplicated(keep="last")]
+
+    annual_rate = _load_local_fred_annual_rate(
+        market.fred_series,
+        market.start,
+        market.end,
+    )
+    if annual_rate is None:
+        raise ValueError(
+            "Missing local FRED data for series "
+            f"'{market.fred_series}'. Download it first using download_data.ipynb or main.ipynb."
+        )
+
+    daily_rate = _annual_to_daily_rate(
+        annual_rate,
+        is_percent=market.fred_is_percent,
+    )
+
+    # Compute returns from local prices only; no online fallback is used in batch mode.
+    base_returns = _compute_daily_simple_returns(prices)
+
+    full_index = pd.DatetimeIndex(sorted(set(base_returns.index).union(set(daily_rate.index))))
+    for ticker in base_tickers:
+        ticker_returns = _compute_daily_simple_returns(symbol_prices[ticker].to_frame(name=ticker))[ticker].dropna()
+        _warn_missing_dates(f"Ticker {ticker}", full_index, pd.DatetimeIndex(ticker_returns.index))
+    _warn_missing_dates(f"FRED {market.fred_series}", full_index, pd.DatetimeIndex(daily_rate.index))
+
+    overlap_index = base_returns.dropna(how="any").index.intersection(daily_rate.dropna().index)
+    if overlap_index.empty:
+        raise ValueError(
+            "No overlapping local history across selected tickers and rate series. "
+            "Refresh data in download_data.ipynb or choose assets with overlapping data."
+        )
+
+    base_returns = base_returns.loc[overlap_index]
+    daily_rate = daily_rate.reindex(overlap_index).ffill()
+
+    if base_returns.empty or daily_rate.empty:
+        raise ValueError("No aligned local historical data available after overlap filtering.")
+
+    asset_return_series: dict[str, pd.Series] = {}
+    for asset in assets:
+        if isinstance(asset, SpotAssetConfig):
+            series = base_returns[asset.ticker].copy()
+            series.name = asset.id
+            asset_return_series[asset.id] = series
+            continue
+
+        letf_returns = synthetic_letf_daily_returns(
+            underlying_returns=base_returns[asset.underlying_ticker],
+            leverage=asset.leverage,
+            ter=asset.ter,
+            borrowing_rate=daily_rate,
+            spread=asset.spread,
+            borrowing_rate_is_annual=False,
+        )
+        letf_returns.name = asset.id
+        asset_return_series[asset.id] = letf_returns
+
+    historical_asset_returns = pd.concat(asset_return_series.values(), axis=1)
+    historical_asset_returns = historical_asset_returns.replace([np.inf, -np.inf], np.nan).dropna(how="any")
+    daily_rate = daily_rate.reindex(historical_asset_returns.index).ffill()
+    return historical_asset_returns, daily_rate
 
 
 def _resolve_largest_market_window(
@@ -39,7 +232,7 @@ def _resolve_largest_market_window(
 ) -> tuple[str, str]:
     """Return the widest aligned historical window available for the given assets."""
     max_end = pd.Timestamp.today().strftime("%Y-%m-%d")
-    historical_returns, _ = build_historical_asset_returns(
+    historical_returns, _ = _build_local_historical_asset_returns(
         market=MarketDataConfig(
             start="1900-01-01",
             end=max_end,
@@ -177,6 +370,13 @@ def _set_portfolio_name(csv_path: Path, config: SimulationConfig, portfolio_name
         raise ValueError(f"Could not find composition row in {csv_path}")
 
     df.loc[match, "portfolio_name"] = portfolio_name
+
+    numeric_cols = df.select_dtypes(include=[np.number]).columns
+    if len(numeric_cols) > 0:
+        scale = 1000.0
+        numeric = df.loc[:, numeric_cols].to_numpy(dtype=float)
+        df.loc[:, numeric_cols] = np.trunc(numeric * scale) / scale
+
     df.to_csv(csv_path, index=False)
 
 
@@ -600,7 +800,7 @@ PORTFOLIOS = [
             {"id": "VGLT", "ticker": "VGLT", "weight": 0.40, "leverage": 1.0},
             {"id": "IEF", "ticker": "IEF", "weight": 0.15, "leverage": 1.0},
             {"id": "GLD", "ticker": "GLD", "weight": 0.075, "leverage": 1.0},
-            {"id": "PDBC", "ticker": "PDBC", "weight": 0.075, "leverage": 1.0},
+            {"id": "DBC", "ticker": "DBC", "weight": 0.075, "leverage": 1.0},
         ],
     },
     {
@@ -610,7 +810,7 @@ PORTFOLIOS = [
             {"id": "VGLT", "ticker": "VGLT", "weight": 0.40, "leverage": 2.0},
             {"id": "IEF", "ticker": "IEF", "weight": 0.15, "leverage": 2.0},
             {"id": "GLD", "ticker": "GLD", "weight": 0.075, "leverage": 2.0},
-            {"id": "PDBC", "ticker": "PDBC", "weight": 0.075, "leverage": 2.0},
+            {"id": "DBC", "ticker": "DBC", "weight": 0.075, "leverage": 2.0},
         ],
     },
     {
@@ -620,7 +820,7 @@ PORTFOLIOS = [
             {"id": "VGLT", "ticker": "VGLT", "weight": 0.40, "leverage": 3.0},
             {"id": "IEF", "ticker": "IEF", "weight": 0.15, "leverage": 3.0},
             {"id": "GLD", "ticker": "GLD", "weight": 0.075, "leverage": 3.0},
-            {"id": "PDBC", "ticker": "PDBC", "weight": 0.075, "leverage": 3.0},
+            {"id": "DBC", "ticker": "DBC", "weight": 0.075, "leverage": 3.0},
         ],
     },
     {
@@ -669,6 +869,9 @@ def run_batch() -> None:
         _base_config(
             assets,
             target_weights,
+            # if we put start = 1900 we take the first available
+            # overlapping date across all assets
+            # which simplifies the logic for shared historical scenario.
             start="1900-01-01",
             end=placeholder_end,
         )
@@ -703,7 +906,7 @@ def run_batch() -> None:
         "Building shared historical scenario "
         f"for {len(shared_assets)} unique return streams across {len(configs)} portfolios..."
     )
-    shared_historical_returns, shared_daily_rate = build_historical_asset_returns(
+    shared_historical_returns, shared_daily_rate = _build_local_historical_asset_returns(
         market=first_config.market,
         assets=shared_assets,
     )

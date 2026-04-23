@@ -20,7 +20,10 @@ from urllib.request import Request, urlopen
 import warnings
 
 import pandas as pd
-import yfinance as yf
+try:
+	import yfinance as yf
+except Exception:  # pragma: no cover - optional dependency at runtime
+	yf = None
 
 try:
 	from defeatbeta_api.data.ticker import Ticker as DefeatbetaTicker
@@ -51,6 +54,12 @@ def _yf_download_with_retries(
 	base_backoff_seconds: float = YF_BASE_BACKOFF_SECONDS,
 ) -> pd.DataFrame:
 	"""Download from yfinance with bounded retries for transient failures."""
+	if yf is None:
+		raise RuntimeError(
+			"yfinance is not installed. Install it or run download_data.ipynb/main.ipynb "
+			"in an environment that includes yfinance to refresh market data."
+		)
+
 	last_exc: Exception | None = None
 
 	for attempt in range(1, max_retries + 1):

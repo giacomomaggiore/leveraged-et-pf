@@ -31,7 +31,7 @@ def _canonical_portfolio_name(config: "SimulationConfig") -> str:
         rows.append((ticker, weight, leverage))
 
     return " | ".join(
-        f"{ticker} w={weight:.6f} lev={leverage:.6f}"
+        f"{ticker} w={weight:.2f} lev={leverage:.2f}"
         for ticker, weight, leverage in rows
     )
 
@@ -49,6 +49,19 @@ def _flatten_metrics_summary(metrics_summary: pd.DataFrame) -> dict[str, float]:
             key = f"{metric}__{stat}"
             out[key] = float(value) if pd.notna(value) else np.nan
 
+    return out
+
+
+def _truncate_numeric_for_csv(df: pd.DataFrame, decimals: int = 2) -> pd.DataFrame:
+    """Truncate numeric columns to a fixed number of decimals before CSV export."""
+    out = df.copy()
+    numeric_cols = out.select_dtypes(include=[np.number]).columns
+    if len(numeric_cols) == 0:
+        return out
+
+    scale = float(10 ** decimals)
+    numeric = out.loc[:, numeric_cols].to_numpy(dtype=float)
+    out.loc[:, numeric_cols] = np.trunc(numeric * scale) / scale
     return out
 
 
@@ -130,7 +143,7 @@ def save_portfolio_metrics_summary(
         "portfolio_name",
         *[c for c in final_df.columns if c not in {"portfolio composition", "portfolio_name"}],
     ]
-    final_df = final_df[ordered_cols]
+    final_df = _truncate_numeric_for_csv(final_df[ordered_cols], decimals=2)
     final_df.to_csv(csv_path, index=False)
     return csv_path
 
