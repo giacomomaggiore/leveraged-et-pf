@@ -4,8 +4,7 @@ from dataclasses import dataclass
 from typing import Mapping
 
 import numpy as np
-
-TRADING_DAYS_PER_YEAR = 252
+from constants import TRADING_DAYS_PER_YEAR
 
 
 @dataclass

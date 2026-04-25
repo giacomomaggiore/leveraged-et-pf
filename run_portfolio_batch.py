@@ -1,14 +1,12 @@
 from __future__ import annotations
 
 import re
-import warnings
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from letf_engine import synthetic_letf_daily_returns
 
 from orchestration import (
     CompleteSimulationResult,
@@ -19,6 +17,7 @@ from orchestration import (
     SpotAssetConfig,
     SyntheticLETFAssetConfig,
     _canonical_portfolio_name,
+    build_historical_asset_returns,
     evaluate_portfolio_on_precomputed_simulation,
     save_portfolio_metrics_summary,
 )
@@ -33,195 +32,52 @@ AGGREGATE_CSV = OUTPUT_DIR / "portfolio_metrics_summary.csv"
 DATA_DIR = Path(__file__).resolve().parent / "data"
 
 
-def _compute_daily_simple_returns(prices: pd.DataFrame) -> pd.DataFrame:
-    if prices.empty:
-        raise ValueError("Prices DataFrame is empty.")
-    returns = prices.pct_change(fill_method=None)
-    returns = returns.replace([float("inf"), float("-inf")], pd.NA)
-    return returns.dropna(how="all")
-
-
-def _annual_to_daily_rate(annual_rate: pd.Series, is_percent: bool = True) -> pd.Series:
-    if annual_rate.empty:
-        raise ValueError("Annual rate series is empty.")
-    annual_decimal = annual_rate / 100.0 if is_percent else annual_rate
-    daily_rate = annual_decimal / 252.0
-    daily_rate.name = f"{annual_rate.name}_daily"
-    return daily_rate
-
-
 def _cache_filename_for_symbol(symbol: str) -> str:
     safe = str(symbol).replace("=", "_EQ_").replace("/", "_")
     return f"{safe}.csv"
 
 
-def _load_local_adj_close_series(symbol: str, start: str, end: str) -> pd.Series | None:
-    csv_path = DATA_DIR / _cache_filename_for_symbol(symbol)
-    if not csv_path.exists():
-        return None
+def _load_local_date_index(symbol: str) -> pd.DatetimeIndex:
+    path = DATA_DIR / _cache_filename_for_symbol(symbol)
+    if not path.exists():
+        raise ValueError(f"Missing local data file: {path}")
 
-    frame = pd.read_csv(csv_path, index_col=0, parse_dates=True)
+    frame = pd.read_csv(path, index_col=0, parse_dates=True)
     if "Adj Close" not in frame.columns:
-        return None
+        raise ValueError(f"Missing 'Adj Close' column in: {path}")
 
-    series = pd.to_numeric(frame["Adj Close"], errors="coerce").dropna().sort_index()
-    if series.empty:
-        return None
-
-    start_ts = pd.Timestamp(start)
-    end_ts = pd.Timestamp(end)
-    series = series.loc[(series.index >= start_ts) & (series.index <= end_ts)]
-    if series.empty:
-        return None
-
-    series.name = str(symbol).upper()
-    return series
+    idx = pd.DatetimeIndex(frame.index).dropna().sort_values()
+    idx = idx[~idx.duplicated(keep="last")]
+    if idx.empty:
+        raise ValueError(f"No valid dates found in: {path}")
+    return idx
 
 
-def _load_local_fred_annual_rate(series_id: str, start: str, end: str) -> pd.Series | None:
-    csv_path = DATA_DIR / f"FRED_{_cache_filename_for_symbol(series_id)}"
-    if not csv_path.exists():
-        return None
+def _load_local_fred_date_index(series_id: str) -> pd.DatetimeIndex:
+    path = DATA_DIR / f"FRED_{_cache_filename_for_symbol(series_id)}"
+    if not path.exists():
+        raise ValueError(f"Missing local FRED file: {path}")
 
-    frame = pd.read_csv(csv_path)
+    frame = pd.read_csv(path)
     if frame.empty:
-        return None
+        raise ValueError(f"Empty local FRED file: {path}")
 
-    date_col = None
-    for candidate in ("DATE", "date", "observation_date", "Observation Date"):
-        if candidate in frame.columns:
-            date_col = candidate
-            break
+    date_col = next(
+        (
+            candidate
+            for candidate in ("DATE", "date", "observation_date", "Observation Date")
+            if candidate in frame.columns
+        ),
+        None,
+    )
     if date_col is None:
-        return None
+        raise ValueError(f"No valid date column found in FRED file: {path}")
 
-    value_col = series_id if series_id in frame.columns else frame.columns[-1]
-    values = pd.to_numeric(frame[value_col], errors="coerce")
-    dates = pd.to_datetime(frame[date_col], errors="coerce")
-
-    series = pd.Series(values.values, index=pd.DatetimeIndex(dates), name=series_id)
-    series = series.dropna().sort_index()
-
-    start_ts = pd.Timestamp(start)
-    end_ts = pd.Timestamp(end)
-    series = series.loc[(series.index >= start_ts) & (series.index <= end_ts)]
-    if series.empty:
-        return None
-
-    return series
-
-
-def _warn_missing_dates(label: str, full_index: pd.DatetimeIndex, series_index: pd.DatetimeIndex) -> None:
-    missing = full_index.difference(series_index)
-    if missing.empty:
-        return
-
-    preview_n = 10
-    preview_dates = ", ".join(d.strftime("%Y-%m-%d") for d in missing[:preview_n])
-    suffix = "" if len(missing) <= preview_n else f" ... (+{len(missing) - preview_n} more)"
-    warnings.warn(
-        f"{label}: missing {len(missing)} dates in local data: {preview_dates}{suffix}. "
-        "Proceeding with the largest overlapping window.",
-        RuntimeWarning,
-    )
-
-
-def _build_local_historical_asset_returns(
-    *,
-    market: MarketDataConfig,
-    assets: list[SpotAssetConfig | SyntheticLETFAssetConfig],
-) -> tuple[pd.DataFrame, pd.Series]:
-    base_tickers = sorted(
-        {
-            (asset.ticker if isinstance(asset, SpotAssetConfig) else asset.underlying_ticker)
-            for asset in assets
-        }
-    )
-
-    symbol_prices: dict[str, pd.Series] = {}
-    missing_tickers: list[str] = []
-    for ticker in base_tickers:
-        s = _load_local_adj_close_series(ticker, market.start, market.end)
-        if s is None:
-            missing_tickers.append(ticker)
-            continue
-        symbol_prices[ticker] = s
-
-    if missing_tickers:
-        missing_files = [str(DATA_DIR / _cache_filename_for_symbol(t)) for t in missing_tickers]
-        raise ValueError(
-            "Missing local ticker data for: "
-            f"{missing_tickers}. "
-            "Download them first using download_data.ipynb or main.ipynb. "
-            f"Expected files: {missing_files}"
-        )
-
-    prices = pd.concat([symbol_prices[t] for t in base_tickers], axis=1)
-    prices.columns = base_tickers
-    prices = prices.sort_index()
-    prices = prices[~prices.index.duplicated(keep="last")]
-
-    annual_rate = _load_local_fred_annual_rate(
-        market.fred_series,
-        market.start,
-        market.end,
-    )
-    if annual_rate is None:
-        raise ValueError(
-            "Missing local FRED data for series "
-            f"'{market.fred_series}'. Download it first using download_data.ipynb or main.ipynb."
-        )
-
-    daily_rate = _annual_to_daily_rate(
-        annual_rate,
-        is_percent=market.fred_is_percent,
-    )
-
-    # Compute returns from local prices only; no online fallback is used in batch mode.
-    base_returns = _compute_daily_simple_returns(prices)
-
-    full_index = pd.DatetimeIndex(sorted(set(base_returns.index).union(set(daily_rate.index))))
-    for ticker in base_tickers:
-        ticker_returns = _compute_daily_simple_returns(symbol_prices[ticker].to_frame(name=ticker))[ticker].dropna()
-        _warn_missing_dates(f"Ticker {ticker}", full_index, pd.DatetimeIndex(ticker_returns.index))
-    _warn_missing_dates(f"FRED {market.fred_series}", full_index, pd.DatetimeIndex(daily_rate.index))
-
-    overlap_index = base_returns.dropna(how="any").index.intersection(daily_rate.dropna().index)
-    if overlap_index.empty:
-        raise ValueError(
-            "No overlapping local history across selected tickers and rate series. "
-            "Refresh data in download_data.ipynb or choose assets with overlapping data."
-        )
-
-    base_returns = base_returns.loc[overlap_index]
-    daily_rate = daily_rate.reindex(overlap_index).ffill()
-
-    if base_returns.empty or daily_rate.empty:
-        raise ValueError("No aligned local historical data available after overlap filtering.")
-
-    asset_return_series: dict[str, pd.Series] = {}
-    for asset in assets:
-        if isinstance(asset, SpotAssetConfig):
-            series = base_returns[asset.ticker].copy()
-            series.name = asset.id
-            asset_return_series[asset.id] = series
-            continue
-
-        letf_returns = synthetic_letf_daily_returns(
-            underlying_returns=base_returns[asset.underlying_ticker],
-            leverage=asset.leverage,
-            ter=asset.ter,
-            borrowing_rate=daily_rate,
-            spread=asset.spread,
-            borrowing_rate_is_annual=False,
-        )
-        letf_returns.name = asset.id
-        asset_return_series[asset.id] = letf_returns
-
-    historical_asset_returns = pd.concat(asset_return_series.values(), axis=1)
-    historical_asset_returns = historical_asset_returns.replace([np.inf, -np.inf], np.nan).dropna(how="any")
-    daily_rate = daily_rate.reindex(historical_asset_returns.index).ffill()
-    return historical_asset_returns, daily_rate
+    idx = pd.DatetimeIndex(pd.to_datetime(frame[date_col], errors="coerce")).dropna().sort_values()
+    idx = idx[~idx.duplicated(keep="last")]
+    if idx.empty:
+        raise ValueError(f"No valid FRED dates found in: {path}")
+    return idx
 
 
 def _resolve_largest_market_window(
@@ -230,23 +86,30 @@ def _resolve_largest_market_window(
     fred_series: str = "EFFR",
     fred_is_percent: bool = True,
 ) -> tuple[str, str]:
-    """Return the widest aligned historical window available for the given assets."""
-    max_end = pd.Timestamp.today().strftime("%Y-%m-%d")
-    historical_returns, _ = _build_local_historical_asset_returns(
-        market=MarketDataConfig(
-            start="1900-01-01",
-            end=max_end,
-            fred_series=fred_series,
-            fred_is_percent=fred_is_percent,
-        ),
-        assets=assets,
+    """Return the widest local overlap window available for the given assets and FRED series."""
+    del fred_is_percent  # only date overlap matters for window inference
+
+    base_tickers = sorted(
+        {
+            (asset.ticker if isinstance(asset, SpotAssetConfig) else asset.underlying_ticker)
+            for asset in assets
+        }
     )
+    if not base_tickers:
+        raise ValueError("No assets were provided for date-window inference.")
 
-    if historical_returns.empty:
-        raise ValueError("No historical data available to infer start/end date window.")
+    overlap = _load_local_fred_date_index(fred_series)
+    for ticker in base_tickers:
+        overlap = overlap.intersection(_load_local_date_index(ticker))
 
-    start = pd.Timestamp(historical_returns.index.min()).strftime("%Y-%m-%d")
-    end = pd.Timestamp(historical_returns.index.max()).strftime("%Y-%m-%d")
+    if overlap.empty:
+        raise ValueError(
+            "No overlapping local dates across selected assets and FRED series. "
+            "Refresh data files in the data folder."
+        )
+
+    start = pd.Timestamp(overlap.min()).strftime("%Y-%m-%d")
+    end = pd.Timestamp(overlap.max()).strftime("%Y-%m-%d")
     return start, end
 
 
@@ -469,26 +332,23 @@ def _validate_shared_batch_inputs(configs: list[SimulationConfig]) -> None:
 
 def _export_figures(
     *,
-    portfolio_name: str,
     config: SimulationConfig,
     result: CompleteSimulationResult,
     output_dir: Path,
 ) -> None:
+    # Build one summary chart with paths on top and terminal distribution below.
     wealth_paths = result.portfolio.wealth_paths
     terminal = wealth_paths[:, -1]
     subtitle = _build_assets_subtitle(config)
 
-    terminal_summary = pd.Series(
-        {
-            "min": float(np.min(terminal)),
-            "p5": float(np.quantile(terminal, 0.05)),
-            "median": float(np.median(terminal)),
-            "mean": float(np.mean(terminal)),
-            "p95": float(np.quantile(terminal, 0.95)),
-            "max": float(np.max(terminal)),
-        },
-        name="TerminalWealth",
-    )
+    terminal_summary = {
+        "min": float(np.min(terminal)),
+        "p5": float(np.quantile(terminal, 0.05)),
+        "median": float(np.median(terminal)),
+        "mean": float(np.mean(terminal)),
+        "p95": float(np.quantile(terminal, 0.95)),
+        "max": float(np.max(terminal)),
+    }
 
     summary_note = (
         f"FRED={config.market.fred_series}"
@@ -535,6 +395,43 @@ def _export_figures(
         f"median={terminal_summary['median']:,.0f} | mean={terminal_summary['mean']:,.0f} | "
         f"p95={terminal_summary['p95']:,.0f} | max={terminal_summary['max']:,.0f}"
     )
+
+    metrics_summary = result.metrics.summary
+    if isinstance(metrics_summary, pd.DataFrame):
+        metrics_series = metrics_summary.iloc[:, 0] if metrics_summary.shape[1] == 1 else metrics_summary.mean(axis=1)
+    else:
+        metrics_series = pd.Series(metrics_summary)
+
+    def _fmt_metric_value(v: object) -> str:
+        if isinstance(v, (float, np.floating)):
+            return f"{v:,.2f}" if abs(v) >= 1000 else f"{v:.4f}"
+        return str(v)
+
+    metrics_table_df = pd.DataFrame(
+        {
+            "Metric": [str(idx) for idx in metrics_series.index],
+            "Value": [_fmt_metric_value(v) for v in metrics_series.values],
+        }
+    )
+
+    n_rows = max(1, int(np.ceil(len(metrics_table_df) / 2)))
+    left_metrics = metrics_table_df.iloc[:n_rows].reset_index(drop=True)
+    right_metrics = metrics_table_df.iloc[n_rows:].reset_index(drop=True)
+    if len(right_metrics) < n_rows:
+        right_metrics = pd.concat(
+            [
+                right_metrics,
+                pd.DataFrame({"Metric": [""] * (n_rows - len(right_metrics)), "Value": [""] * (n_rows - len(right_metrics))}),
+            ],
+            ignore_index=True,
+        )
+
+    theme_font = "Satoshi, 'Satoshi Variable', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
+    title_color = "#0f172a"
+    body_color = "#334155"
+    table_y_top = 0.59
+    table_y_bottom = table_y_top - 0.13
+
     fig_combined = make_subplots(
         rows=2,
         cols=1,
@@ -554,7 +451,7 @@ def _export_figures(
         height=1050,
         margin={"t": 110, "b": 100, "l": 70, "r": 30},
         showlegend=fig_spaghetti.layout.showlegend if fig_spaghetti.layout.showlegend is not None else False,
-        font={"family": "Satoshi, 'Satoshi Variable', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif", "size": 12, "color": "#0f172a"},
+        font={"family": theme_font, "size": 12, "color": title_color},
         title_font={"family": "Satoshi"},
     )
 
@@ -591,7 +488,7 @@ def _export_figures(
         showarrow=False,
         xanchor="left",
         yanchor="top",
-        font={"size": 20, "color": "#0f172a"},
+        font={"size": 20, "color": title_color},
     )
 
     fig_combined.add_annotation(
@@ -604,15 +501,12 @@ def _export_figures(
         xanchor="left",
         yanchor="top",
         align="left",
-        font={"size": 12, "color": "#334155"},
+        font={"size": 12, "color": body_color},
     )
-
-    summary_box_y = 0.59
-    metrics_box_y = 0.59
 
     fig_combined.add_annotation(
         x=0.65,
-        y=summary_box_y,
+        y=table_y_top,
         xref="paper",
         yref="paper",
         text=summary_note,
@@ -620,57 +514,11 @@ def _export_figures(
         xanchor="left",
         yanchor="top",
         align="left",
-        font={"size": 11, "color": "#334155"},
+        font={"size": 11, "color": body_color},
         bgcolor="rgba(255, 255, 255, 0.82)",
         bordercolor="#cbd5e1",
         borderwidth=1,
     )
-
-    metrics_summary = result.metrics.summary
-    if isinstance(metrics_summary, pd.DataFrame):
-        if metrics_summary.shape[1] == 1:
-            metrics_series = metrics_summary.iloc[:, 0]
-        else:
-            metrics_series = metrics_summary.mean(axis=1)
-    else:
-        metrics_series = pd.Series(metrics_summary)
-
-    def _fmt_metric_value(v: object) -> str:
-        if isinstance(v, (float, np.floating)):
-            if abs(v) >= 1000:
-                return f"{v:,.2f}"
-            return f"{v:.4f}"
-        return str(v)
-
-    metrics_table_df = pd.DataFrame(
-        {
-            "Metric": [str(idx) for idx in metrics_series.index],
-            "Value": [_fmt_metric_value(v) for v in metrics_series.values],
-        }
-    )
-
-    n_metrics = len(metrics_table_df)
-    n_rows = max(1, int(np.ceil(n_metrics / 2)))
-    left_metrics = metrics_table_df.iloc[:n_rows].reset_index(drop=True)
-    right_metrics = metrics_table_df.iloc[n_rows:].reset_index(drop=True)
-    if len(right_metrics) < n_rows:
-        right_metrics = pd.concat(
-            [
-                right_metrics,
-                pd.DataFrame(
-                    {
-                        "Metric": [""] * (n_rows - len(right_metrics)),
-                        "Value": [""] * (n_rows - len(right_metrics)),
-                    }
-                ),
-            ],
-            ignore_index=True,
-        )
-
-    table_top = metrics_box_y
-    table_height = 0.13
-    table_left = 0.00
-    table_width = 0.58
 
     row_fill = ["#ffffff" if i % 2 == 0 else "#f8fafc" for i in range(n_rows)]
 
@@ -699,8 +547,8 @@ def _export_figures(
                 "height": 21,
             },
             domain={
-                "x": [table_left, table_left + table_width],
-                "y": [table_top - table_height, table_top],
+                "x": [0.00, 0.58],
+                "y": [table_y_bottom, table_y_top],
             },
         )
     )
@@ -714,7 +562,7 @@ def _export_figures(
         showarrow=False,
         xanchor="left",
         yanchor="top",
-        font={"size": 18, "color": "#0f172a"},
+        font={"size": 18, "color": title_color},
     )
 
     fig_combined.add_annotation(
@@ -727,12 +575,12 @@ def _export_figures(
         xanchor="left",
         yanchor="top",
         align="left",
-        font={"size": 11, "color": "#334155"},
+        font={"size": 11, "color": body_color},
     )
 
     for fig in (fig_spaghetti, fig_terminal, fig_combined):
         fig.update_layout(
-            font={"family": "Satoshi, 'Satoshi Variable', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif", "size": 12, "color": "#0f172a"},
+            font={"family": theme_font, "size": 12, "color": title_color},
             title_font={"family": "Satoshi"},
         )
         fig.update_xaxes(tickfont={"family": "Satoshi"}, title_font={"family": "Satoshi"})
@@ -869,9 +717,6 @@ def run_batch() -> None:
         _base_config(
             assets,
             target_weights,
-            # if we put start = 1900 we take the first available
-            # overlapping date across all assets
-            # which simplifies the logic for shared historical scenario.
             start="1900-01-01",
             end=placeholder_end,
         )
@@ -906,7 +751,7 @@ def run_batch() -> None:
         "Building shared historical scenario "
         f"for {len(shared_assets)} unique return streams across {len(configs)} portfolios..."
     )
-    shared_historical_returns, shared_daily_rate = _build_local_historical_asset_returns(
+    shared_historical_returns, shared_daily_rate = build_historical_asset_returns(
         market=first_config.market,
         assets=shared_assets,
     )
@@ -945,7 +790,6 @@ def run_batch() -> None:
             asset_source_columns=source_map,
         )
 
-        # 1) Upsert row in global /output_2/portfolio_metrics_summary.csv
         save_portfolio_metrics_summary(
             config=config,
             metrics_summary=result.metrics.summary,
@@ -953,7 +797,6 @@ def run_batch() -> None:
         )
         _set_portfolio_name(AGGREGATE_CSV, config, name)
 
-        # 2) Save one-row CSV per portfolio under /output_2/<portfolio>/portfolio_metrics_summary.csv
         per_portfolio_dir = OUTPUT_DIR / _slugify(name)
         per_portfolio_dir.mkdir(parents=True, exist_ok=True)
         per_portfolio_csv = per_portfolio_dir / "portfolio_metrics_summary.csv"
@@ -965,9 +808,7 @@ def run_batch() -> None:
         )
         _set_portfolio_name(per_portfolio_csv, config, name)
 
-        # 3) Save one combined summary figure in each portfolio output folder.
         _export_figures(
-            portfolio_name=name,
             config=config,
             result=result,
             output_dir=per_portfolio_dir,

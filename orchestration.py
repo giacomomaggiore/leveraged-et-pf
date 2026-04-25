@@ -86,8 +86,7 @@ def save_portfolio_metrics_summary(
     csv_path.parent.mkdir(parents=True, exist_ok=True)
 
     new_row = pd.DataFrame([row_payload])
-    if "portfolio_name" not in new_row.columns:
-        new_row["portfolio_name"] = ""
+    new_row["portfolio_name"] = ""
 
     if csv_path.exists():
         existing = pd.read_csv(csv_path)
@@ -101,25 +100,13 @@ def save_portfolio_metrics_summary(
                 f"Existing CSV '{csv_path}' must contain a 'portfolio composition' column."
             )
 
-        if "portfolio_name" not in existing.columns:
-            existing["portfolio_name"] = ""
+        existing["portfolio_name"] = existing.get("portfolio_name", "").fillna("").astype(str)
 
-        # Keep existing column order and extend only when new metrics appear.
-        all_columns = [
-            "portfolio composition",
-            "portfolio_name",
-            *[
-                c
-                for c in existing.columns
-                if c not in {"portfolio composition", "portfolio_name"}
-            ],
+        # Keep existing metric order and append only new metric columns from the incoming row.
+        all_columns = ["portfolio composition", "portfolio_name"] + [
+            c for c in existing.columns if c not in {"portfolio composition", "portfolio_name"}
         ]
-        for col in new_row.columns:
-            if col not in all_columns:
-                all_columns.append(col)
-
-        if "portfolio_name" not in new_row.columns:
-            new_row["portfolio_name"] = ""
+        all_columns += [c for c in new_row.columns if c not in all_columns]
 
         existing = existing.reindex(columns=all_columns)
         new_row = new_row.reindex(columns=all_columns)
@@ -135,8 +122,7 @@ def save_portfolio_metrics_summary(
     else:
         final_df = new_row
 
-    if "portfolio_name" not in final_df.columns:
-        final_df["portfolio_name"] = ""
+    final_df["portfolio_name"] = final_df.get("portfolio_name", "").fillna("").astype(str)
 
     ordered_cols = [
         "portfolio composition",
@@ -147,8 +133,6 @@ def save_portfolio_metrics_summary(
     final_df.to_csv(csv_path, index=False)
     return csv_path
 
-#dataclass definition
-#datafrozen = readonly after creation
 @dataclass(frozen=True)
 class MarketDataConfig:
     """Inputs required to fetch and align historical market data."""
@@ -168,12 +152,6 @@ class SpotAssetConfig:
     kind: Literal["spot_etf"] = "spot_etf"
 
 
-#to define synthetic leveraged etf, you need to specify:
-# ticker
-# daily leverage ratio 
-# spread 
-# ter
-# the id can be chosen freely as you like (also Banana ETF works)
 @dataclass(frozen=True)
 class SyntheticLETFAssetConfig:
     """A synthetic LETF built from underlying returns and financing costs."""
@@ -213,8 +191,6 @@ class MonteCarloConfig:
     seed: int | None = None
 
 
-#simulation config will be passed to the main.ipynb to run the full simulation,
-#it contains all the necessary information 
 @dataclass(frozen=True)
 class SimulationConfig:
     """Single object passed from main.ipynb to run the full simulation."""
@@ -224,8 +200,7 @@ class SimulationConfig:
     portfolio: PortfolioConfig
     monte_carlo: MonteCarloConfig
     
-    # portfolio is considered ruined if wealth falls below this fraction 
-    # of initial capital at any point in the path
+    # Portfolio is considered ruined if wealth drops below this fraction of initial capital.
     metrics_ruin_threshold_fraction: float = 0.10
     use_mean_risk_free_for_metrics: bool = True
 
@@ -353,9 +328,6 @@ def _build_historical_asset_returns_from_market_and_assets(
             base_tickers.add(asset.ticker)
         elif isinstance(asset, SyntheticLETFAssetConfig):
             base_tickers.add(asset.underlying_ticker)
-
-    print("Base tickers needed for historical data:")
-    print(base_tickers)
 
     base_returns, daily_rate = load_market_data(
         tickers=sorted(base_tickers),
@@ -509,14 +481,6 @@ def evaluate_portfolio_on_precomputed_simulation(
     )
 
 
-def _build_historical_asset_returns(config: SimulationConfig) -> tuple[pd.DataFrame, pd.Series]:
-    """Create the historical return panel used as Monte Carlo input."""
-    return _build_historical_asset_returns_from_market_and_assets(
-        market=config.market,
-        assets=config.assets,
-    )
-
-
 def run_complete_simulation(
     config: SimulationConfig,
     shared_bootstrap_uniforms: np.ndarray | None = None,
@@ -532,7 +496,10 @@ def run_complete_simulation(
     _validate_target_weights(config.portfolio.target_weights, valid_asset_ids=asset_ids)
 
     # Build the clean historical dataset used as input for path generation.
-    historical_asset_returns, daily_rate = _build_historical_asset_returns(config)
+    historical_asset_returns, daily_rate = build_historical_asset_returns(
+        market=config.market,
+        assets=config.assets,
+    )
 
     # Generate simulated daily asset returns across all paths and horizon days.
     simulated = simulate_monte_carlo(

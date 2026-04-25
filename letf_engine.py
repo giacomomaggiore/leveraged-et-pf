@@ -9,8 +9,7 @@ from __future__ import annotations
 from numbers import Real
 
 import pandas as pd
-
-TRADING_DAYS_PER_YEAR = 252
+from constants import TRADING_DAYS_PER_YEAR
 
 
 def _validate_scalar_rate(name: str, value: float) -> float:

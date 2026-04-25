@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import numpy as np
+from metrics import _compute_drawdowns, _validate_wealth_paths
 
 try:
     import plotly.graph_objects as go
@@ -14,38 +15,6 @@ try:
     import matplotlib.pyplot as plt
 except Exception:  # pragma: no cover - handled at runtime
     plt = None
-
-
-def _require_plotly() -> None:
-    if go is None:
-        raise ImportError(
-            "plotly is required for visuals.py. Install it with 'pip install plotly'."
-        )
-
-
-def _require_matplotlib() -> None:
-    if plt is None:
-        raise ImportError(
-            "matplotlib is required for matplotlib visuals. Install it with 'pip install matplotlib'."
-        )
-
-
-def _validate_wealth_paths(wealth_paths: np.ndarray) -> np.ndarray:
-    arr = np.asarray(wealth_paths, dtype=float)
-    if arr.ndim != 2:
-        raise ValueError("wealth_paths must have shape (paths, time+1).")
-    if arr.shape[0] <= 0 or arr.shape[1] <= 1:
-        raise ValueError("wealth_paths must include at least one path and two time points.")
-    if not np.isfinite(arr).all():
-        raise ValueError("wealth_paths contains NaN or inf values.")
-    if np.any(arr <= 0.0):
-        raise ValueError("wealth_paths must be strictly positive.")
-    return arr
-
-
-def _compute_drawdowns(wealth_paths: np.ndarray) -> np.ndarray:
-    high_water_mark = np.maximum.accumulate(wealth_paths, axis=1)
-    return (wealth_paths / high_water_mark) - 1.0
 
 
 def plot_spaghetti_paths(
@@ -114,7 +83,10 @@ def plot_spaghetti_paths(
     x = np.arange(n_cols)
 
     if backend == "matplotlib":
-        _require_matplotlib()
+        if plt is None:
+            raise ImportError(
+                "matplotlib is required for matplotlib visuals. Install it with 'pip install matplotlib'."
+            )
         fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
 
         for idx in range(n_pick):
@@ -126,7 +98,7 @@ def plot_spaghetti_paths(
                 color="#1f4e79",
             )
 
-        #y_label = "Normalized Wealth" if normalize_to_1 else "Portfolio Value"
+        y_label = "Normalized Wealth" if normalize_to_1 else "Portfolio Value"
         ax.set_xlabel("Trading Day")
         ax.set_ylabel(y_label)
         ax.grid(True, linestyle="--", alpha=0.25)
@@ -154,7 +126,10 @@ def plot_spaghetti_paths(
         fig.subplots_adjust(top=0.86, bottom=0.22, left=0.08, right=0.98)
         return fig
 
-    _require_plotly()
+    if go is None:
+        raise ImportError(
+            "plotly is required for visuals.py. Install it with 'pip install plotly'."
+        )
     fig = go.Figure()
 
     for idx in range(n_pick):
@@ -265,7 +240,10 @@ def plot_terminal_wealth_distribution(
     terminal = wealth[:, -1]
 
     if backend == "matplotlib":
-        _require_matplotlib()
+        if plt is None:
+            raise ImportError(
+                "matplotlib is required for matplotlib visuals. Install it with 'pip install matplotlib'."
+            )
         fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
         ax.hist(terminal, bins=bins, color="#2b6cb0", edgecolor="white", linewidth=0.7, alpha=0.9)
         ax.set_title(title, fontsize=18, fontweight="bold", pad=14)
@@ -277,7 +255,10 @@ def plot_terminal_wealth_distribution(
         fig.tight_layout()
         return fig
 
-    _require_plotly()
+    if go is None:
+        raise ImportError(
+            "plotly is required for visuals.py. Install it with 'pip install plotly'."
+        )
 
     fig = go.Figure(
         data=[
@@ -329,7 +310,10 @@ def plot_drawdown_chart(
     x = np.arange(wealth.shape[1])
 
     if backend == "matplotlib":
-        _require_matplotlib()
+        if plt is None:
+            raise ImportError(
+                "matplotlib is required for matplotlib visuals. Install it with 'pip install matplotlib'."
+            )
         fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
         ax.plot(x, median_dd, lw=2.2, color="#1f77b4", label="Median Drawdown")
         ax.plot(x, worst_dd, lw=2.2, color="#d62728", label="Worst-Case Drawdown")
@@ -342,7 +326,10 @@ def plot_drawdown_chart(
         fig.tight_layout()
         return fig
 
-    _require_plotly()
+    if go is None:
+        raise ImportError(
+            "plotly is required for visuals.py. Install it with 'pip install plotly'."
+        )
 
     fig = go.Figure()
     fig.add_trace(
@@ -382,5 +369,8 @@ def plot_drawdown_chart(
 
 def save_matplotlib_figure(fig: Any, output_path: str | Path, *, dpi: int = 220) -> None:
     """Save a matplotlib figure with a tight bounding box for long notes/subtitles."""
-    _require_matplotlib()
+    if plt is None:
+        raise ImportError(
+            "matplotlib is required for matplotlib visuals. Install it with 'pip install matplotlib'."
+        )
     fig.savefig(Path(output_path), dpi=dpi, bbox_inches="tight")

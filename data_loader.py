@@ -20,6 +20,7 @@ from urllib.request import Request, urlopen
 import warnings
 
 import pandas as pd
+from constants import TRADING_DAYS_PER_YEAR
 try:
 	import yfinance as yf
 except Exception:  # pragma: no cover - optional dependency at runtime
@@ -31,19 +32,11 @@ except Exception:  # pragma: no cover - optional dependency at runtime
 	# Optional provider may fail to import due to missing package or binary ABI mismatch.
 	DefeatbetaTicker = None
 
-TRADING_DAYS_PER_YEAR = 252
 YF_MAX_RETRIES = 6
 YF_BASE_BACKOFF_SECONDS = 2.0
 YF_JITTER_FRACTION = 0.35
 YF_MAX_BACKOFF_SECONDS = 90.0
 PRICE_CACHE_DIR = Path(__file__).resolve().parent / "data"
-
-
-def _is_rate_limit_error(exc: Exception) -> bool:
-	"""Return True when an exception likely indicates a Yahoo rate limit."""
-	name = exc.__class__.__name__.lower()
-	text = str(exc).lower()
-	return "ratelimit" in name or "too many requests" in text or "rate limited" in text
 
 
 def _yf_download_with_retries(
@@ -60,8 +53,6 @@ def _yf_download_with_retries(
 			"in an environment that includes yfinance to refresh market data."
 		)
 
-	last_exc: Exception | None = None
-
 	for attempt in range(1, max_retries + 1):
 		try:
 			return yf.download(
@@ -73,8 +64,12 @@ def _yf_download_with_retries(
 				threads=False,
 			)
 		except Exception as exc:  # pragma: no cover - depends on upstream API behavior
-			last_exc = exc
-			if not _is_rate_limit_error(exc) or attempt == max_retries:
+			name = exc.__class__.__name__.lower()
+			text = str(exc).lower()
+			is_rate_limited = (
+				"ratelimit" in name or "too many requests" in text or "rate limited" in text
+			)
+			if not is_rate_limited or attempt == max_retries:
 				raise
 
 			exponential = base_backoff_seconds * (2 ** (attempt - 1))
@@ -89,10 +84,7 @@ def _yf_download_with_retries(
 			)
 			time.sleep(sleep_s)
 
-	if last_exc is not None:
-		raise last_exc
-
-	return pd.DataFrame()
+	raise RuntimeError("yfinance download failed after all retries.")
 
 
 def _extract_adj_close(raw: pd.DataFrame, symbols: list[str]) -> pd.DataFrame:
@@ -185,85 +177,42 @@ def _save_cached_symbol_prices(symbol: str, series: pd.Series) -> None:
 def _download_from_defeatbeta(symbol: str, start: str | datetime, end: str | datetime) -> pd.Series | None:
 	"""Try to fetch close prices from defeatbeta_api for a single symbol."""
 	if DefeatbetaTicker is None:
-		warnings.warn(
-			"defeatbeta_api is not installed/importable, so fallback data cannot be fetched.",
-			RuntimeWarning,
-		)
 		return None
 
 	try:
 		raw = DefeatbetaTicker(symbol).price()
-	except Exception as exc:
-		warnings.warn(
-			f"defeatbeta_api request failed for {symbol}: {exc}",
-			RuntimeWarning,
-		)
-		return None
-
-	if raw is None:
-		warnings.warn(
-			f"defeatbeta_api returned None for {symbol}.",
-			RuntimeWarning,
-		)
-		return None
-
-	try:
 		data = pd.DataFrame(raw)
+		if data.empty:
+			return None
+
+		data = data.rename(columns={str(col): str(col).strip().lower() for col in data.columns})
+		date_col = "report_date" if "report_date" in data.columns else ("date" if "date" in data.columns else None)
+		if date_col is None or "close" not in data.columns:
+			return None
+
+		frame = pd.DataFrame(
+			{
+				"Date": pd.to_datetime(data[date_col], errors="coerce"),
+				"Adj Close": pd.to_numeric(data["close"], errors="coerce"),
+			}
+		).dropna()
+		if frame.empty:
+			return None
+
+		frame = frame.set_index("Date").sort_index()
+		frame = frame[~frame.index.duplicated(keep="last")]
+
+		start_ts = pd.Timestamp(start)
+		end_ts = pd.Timestamp(end)
+		series = frame.loc[(frame.index >= start_ts) & (frame.index <= end_ts), "Adj Close"]
+		if series.empty:
+			return None
+
+		series.name = symbol
+		return series
 	except Exception as exc:
-		warnings.warn(
-			f"defeatbeta_api payload could not be parsed for {symbol}: {exc}",
-			RuntimeWarning,
-		)
+		warnings.warn(f"defeatbeta_api failed for {symbol}: {exc}", RuntimeWarning)
 		return None
-
-	if data.empty:
-		warnings.warn(
-			f"defeatbeta_api returned an empty dataset for {symbol}.",
-			RuntimeWarning,
-		)
-		return None
-
-	data = data.rename(columns={str(col): str(col).strip().lower() for col in data.columns})
-	date_col = "report_date" if "report_date" in data.columns else ("date" if "date" in data.columns else None)
-	close_col = "close" if "close" in data.columns else None
-	if date_col is None or close_col is None:
-		warnings.warn(
-			(
-				f"defeatbeta_api dataset for {symbol} is missing required columns "
-				"('report_date'/'date' and 'close')."
-			),
-			RuntimeWarning,
-		)
-		return None
-
-	frame = pd.DataFrame(
-		{
-			"Date": pd.to_datetime(data[date_col], errors="coerce"),
-			"Adj Close": pd.to_numeric(data[close_col], errors="coerce"),
-		}
-	).dropna()
-	if frame.empty:
-		warnings.warn(
-			f"defeatbeta_api had no valid rows after cleanup for {symbol}.",
-			RuntimeWarning,
-		)
-		return None
-
-	frame = frame.set_index("Date").sort_index()
-	frame = frame[~frame.index.duplicated(keep="last")]
-
-	start_ts = pd.Timestamp(start)
-	end_ts = pd.Timestamp(end)
-	series = frame.loc[(frame.index >= start_ts) & (frame.index <= end_ts), "Adj Close"]
-	if series.empty:
-		warnings.warn(
-			f"defeatbeta_api has no rows for {symbol} in requested window {start_ts.date()} -> {end_ts.date()}.",
-			RuntimeWarning,
-		)
-		return None
-
-	series.name = symbol
-	return series
 
 
 def _normalize_tickers(tickers: Iterable[str]) -> list[str]:
@@ -439,7 +388,12 @@ def download_adj_close_prices(
 			fallback_frames.append(single_adj_close[[symbol]])
 			_save_cached_symbol_prices(symbol=symbol, series=single_adj_close[symbol].dropna())
 		except Exception as exc:  # pragma: no cover - depends on upstream API behavior
-			if _is_rate_limit_error(exc):
+			name = exc.__class__.__name__.lower()
+			text = str(exc).lower()
+			is_rate_limited = (
+				"ratelimit" in name or "too many requests" in text or "rate limited" in text
+			)
+			if is_rate_limited:
 				defeatbeta_series = _download_from_defeatbeta(symbol=symbol, start=fetch_start, end=end_ts)
 				if defeatbeta_series is not None and not defeatbeta_series.empty:
 					warnings.warn(
@@ -597,25 +551,14 @@ def _download_fred_annual_rate(
 	"""Download one FRED annualized rate series using official CSV endpoint."""
 	url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}"
 	req = Request(url, headers={"User-Agent": "Mozilla/5.0 leveraged-etf-pf/1.0"})
-	last_exc: Exception | None = None
-	data: pd.DataFrame | None = None
-
 	try:
 		with urlopen(req, timeout=30) as resp:
 			payload = resp.read().decode("utf-8", errors="replace")
 		data = pd.read_csv(StringIO(payload))
 	except Exception as exc:
-		last_exc = exc
-
-	if data is None:
-		try:
-			data = pd.read_csv(url)
-		except Exception as exc:
-			if last_exc is None:
-				last_exc = exc
-			raise RuntimeError(
-				f"Failed to fetch FRED series '{series_id}' from {url}: {last_exc}"
-			) from exc
+		raise RuntimeError(
+			f"Failed to fetch FRED series '{series_id}' from {url}: {exc}"
+		) from exc
 
 	series = _parse_fred_series_from_frame(data, series_id=series_id)
 	if series.empty:

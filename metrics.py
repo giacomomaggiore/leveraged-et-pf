@@ -5,8 +5,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-
-TRADING_DAYS_PER_YEAR = 252
+from constants import TRADING_DAYS_PER_YEAR
 
 
 @dataclass
@@ -101,6 +100,12 @@ def _cagr(wealth_paths: np.ndarray, trading_days: int) -> np.ndarray:
     n_days = wealth_paths.shape[1] - 1
     total_return = wealth_paths[:, -1] / wealth_paths[:, 0]
     return np.power(total_return, trading_days / n_days) - 1.0
+
+
+def _volatility(portfolio_returns: np.ndarray, trading_days: int) -> np.ndarray:
+    """Annualized volatility from daily portfolio returns."""
+    daily_std = portfolio_returns.std(axis=1, ddof=1)
+    return daily_std * np.sqrt(trading_days)
 
 
 def _sharpe_ratio(
@@ -212,6 +217,7 @@ def evaluate_paths_metrics(
 
     drawdowns = _compute_drawdowns(wealth)
     cagr = _cagr(wealth, trading_days=trading_days)
+    volatility = _volatility(portfolio_returns, trading_days=trading_days)
     max_dd = _max_drawdown(drawdowns)
     dd_duration = _max_drawdown_duration(drawdowns)
     sharpe = _sharpe_ratio(portfolio_returns, rf_daily, trading_days=trading_days)
@@ -225,6 +231,7 @@ def evaluate_paths_metrics(
     pathwise = pd.DataFrame(
         {
             "CAGR": cagr,
+            "Volatility": volatility,
             "Max Drawdown": max_dd,
             "Drawdown Duration (Days)": dd_duration,
             "Sharpe Ratio": sharpe,
