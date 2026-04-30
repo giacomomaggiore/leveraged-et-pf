@@ -335,10 +335,17 @@ def _export_figures(
     config: SimulationConfig,
     result: CompleteSimulationResult,
     output_dir: Path,
-) -> None:
+    portfolio_name: str,
+) -> tuple[str, np.ndarray]:
+    """Export figures and return (portfolio_name, median_path) for aggregation."""
     # Build one summary chart with paths on top and terminal distribution below.
     wealth_paths = result.portfolio.wealth_paths
     terminal = wealth_paths[:, -1]
+
+    # Find the path with median terminal wealth.
+    median_terminal = float(np.median(terminal))
+    median_idx = int(np.argmin(np.abs(terminal - median_terminal)))
+    median_path = wealth_paths[median_idx]
     subtitle = _build_assets_subtitle(config)
 
     terminal_summary = {
@@ -594,6 +601,20 @@ def _export_figures(
     summary_png_path = output_dir / "mc-simulation-summary.png"
     fig_combined.write_image(summary_png_path, format="png", width=900, height=1050, scale=2)
 
+    # Export wealth paths as CSV for further analysis.
+    # Transpose so rows are dates and columns are simulations
+    wealth_paths_df = pd.DataFrame(
+        wealth_paths.T,
+        columns=[f"sim_{i}" for i in range(wealth_paths.shape[0])],
+    )
+    wealth_paths_df.index.name = "day"
+    wealth_paths_csv_path = output_dir / "wealth_paths.csv"
+    wealth_paths_df.to_csv(wealth_paths_csv_path)
+    print(f"    Saved wealth paths: {wealth_paths_csv_path} (shape: {wealth_paths_df.shape})")
+
+    return portfolio_name, median_path
+    return portfolio_name, median_path
+
 
 PORTFOLIOS = [
     {
@@ -775,6 +796,9 @@ def run_batch() -> None:
         seed=first_config.monte_carlo.seed,
     )
 
+    # Accumulate median paths across portfolios for final CSV export.
+    median_paths_by_portfolio: dict[str, np.ndarray] = {}
+
     for idx, (name, config, source_map) in enumerate(
         zip(portfolio_names, configs, per_portfolio_source_map),
         start=1,
@@ -808,15 +832,29 @@ def run_batch() -> None:
         )
         _set_portfolio_name(per_portfolio_csv, config, name)
 
-        _export_figures(
+        portfolio_name_returned, median_path = _export_figures(
             config=config,
             result=result,
             output_dir=per_portfolio_dir,
+            portfolio_name=name,
         )
+        median_paths_by_portfolio[portfolio_name_returned] = median_path
 
         print(f"    Saved: {AGGREGATE_CSV}")
         print(f"    Saved: {per_portfolio_csv}")
         print(f"    Saved summary figure under: {per_portfolio_dir}")
+
+    # Write aggregated median paths CSV.
+    if median_paths_by_portfolio:
+        n_days = next(iter(median_paths_by_portfolio.values())).shape[0]
+        median_paths_df = pd.DataFrame({
+            "day": range(n_days),
+            **{name: path for name, path in median_paths_by_portfolio.items()}
+        })
+        median_paths_df.index.name = "index"
+        median_csv_path = OUTPUT_DIR / "median_paths.csv"
+        median_paths_df.to_csv(median_csv_path, index=False)
+        print(f"\nSaved aggregated median paths: {median_csv_path} (shape: {median_paths_df.shape})")
 
 
 if __name__ == "__main__":
