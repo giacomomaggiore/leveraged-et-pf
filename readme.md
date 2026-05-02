@@ -835,33 +835,10 @@ Common extensions:
 - **Drawdown Analysis**: Chekhlov et al. (2005), "Drawdown Measure in Portfolio Optimization."
 - **LETF Decay**: Gastineau (2003), "The Benchmark Index ETF Performance Problem."
 
-### Implementation Details
-- **Cholesky Decomposition**: Golub & Van Loan (2013), "Matrix Computations."
-- **Bootstrap Methods**: Efron & Tibshirani (1993), "An Introduction to the Bootstrap."
-- **PMC Tax Tracking**: Italian tax regulations; comparable to weighted-average cost basis.
 
-### Python Libraries
-- NumPy Documentation: https://numpy.org/doc/
-- Pandas Documentation: https://pandas.pydata.org/docs/
-- Plotly Documentation: https://plotly.com/python/
-
----
 
 ## License & Attribution
 
 This project is provided as-is for educational and research purposes. Please consult with a financial advisor or tax professional before making investment decisions based on simulator outputs.
 
 ---
-
-## Summary: From Theory to Practice
-
-This simulator embodies a rigorous, quantitative approach to portfolio analysis:
-
-1. **Financial Realism**: Daily mechanics (LETF formula, borrowing costs, tax tracking) are modeled exactly, not approximated.
-2. **Computational Precision**: Path-by-path iteration ensures PMC tax calculations are flawless.
-3. **Distributional Insight**: Monte Carlo output provides a full picture of outcomes (mean, percentiles, tail risk) rather than a single "expected" return.
-4. **Actionable Results**: Comprehensive metrics (CAGR, Sharpe, drawdown, ruin probability) enable informed comparisons across portfolio strategies.
-
-By carefully controlling assumptions (seed, method, distribution) and interpreting results within their limitations, users can build confidence in long-term portfolio outcomes before deploying capital.
-
- 
