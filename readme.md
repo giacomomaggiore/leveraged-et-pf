@@ -303,7 +303,7 @@ Where drawdowns are expressed as percentages. The Ulcer Index is particularly se
 
 #### Probability of Ruin
 The fraction of Monte Carlo paths where the portfolio falls below a ruin threshold (default: 10% of initial capital):
-$$P(Ruin) = \frac{\#\{paths : Wealth_{min} \leq 0.10 \times Wealth_0\}}{N\_paths}$$
+$$P(\text{Ruin}) = \frac{|\{p : Wealth_{\min,p} \leq 0.10 \times Wealth_0\}|}{N_{\text{paths}}}$$
 
 **Aggregation**: The module computes summary statistics across all paths:
 - **Mean**: Average metric value across paths.
@@ -446,60 +446,7 @@ plot_spaghetti_paths(result.portfolio.wealth_paths, n_sample=100)
 
 ---
 
-## Key Financial Insights
 
-### Volatility Drag
-
-LETFs do not perfectly replicate $L \times$ benchmark returns over time. The discrepancy arises from **daily rebalancing in volatile markets**:
-
-- On days with high volatility, the LETF amplifies losses more than gains (asymmetry).
-- Rebalancing at lower prices locks in the loss proportionally more than recovery at higher prices gains back proportionally.
-- Over decades, this compounds into significant **beta slippage**.
-
-**Example**: A 2x LETF tracking the S&P 500 in a 20% annual volatility environment loses roughly 1–2% per year to this effect (varies with correlation structure).
-
-### Borrowing Cost Dynamics
-
-Financing costs are *not* static. They vary with:
-- **Benchmark Rate**: EFFR, Fed Funds, Libor, or swap rates change daily.
-- **Spread**: The difference between the benchmark and what the fund actually pays can widen during market stress.
-- **Leverage Factor**: Higher leverage multiplies the cost impact.
-
-The simulator captures this path-dependency: a scenario with a Fed rate spike mid-simulation will see different outcomes than one without, all else equal.
-
-### Tax Impact via PMC
-
-Capital gains taxes reduce long-term returns significantly:
-
-- **Buy-and-Hold**: Low tax because gains are realized only at the end.
-- **Annual Rebalancing**: Every rebalance can trigger capital gains taxes if assets appreciated. The tax drag compounds.
-- **High Volatility + High Leverage**: Frequent rebalancing and larger gains amplify tax drag.
-
-The simulator's PMC tracking ensures that taxes are computed correctly: only profits above the weighted-average purchase price are taxed.
-
-### Path Dependency & Monte Carlo
-
-Because the portfolio simulator is **deterministic given a return path**, different return sequences lead to different outcomes *even with the same summary statistics*. This is path dependency:
-
-- **Return Sequence Risk**: A portfolio that gains 20% and then loses 10% is NOT the same as one that loses 10% then gains 20%. (The first ends at ~$10.8k, the second at ~$10.8k if starting at $10k, but rebalancing behavior differs.)
-- **Rebalancing Timing**: Rebalances occur on fixed dates, not when assets become misaligned. A crash on Dec 31 triggers a rebalance; a crash on Jan 1 doesn't (until the next annual rebalance).
-
-Monte Carlo simulation captures this variability across thousands of paths, providing a distribution of outcomes rather than a single "expected" value.
-
----
-
-## Key Formulas Reference
-
-| Concept | Formula | Notes |
-|---------|---------|-------|
-| Daily LETF Return | $R_{L,t} = L \cdot R_i - [\frac{TER}{252} + (L-1) \frac{Rate + Spread}{252}]$ | Core LETF mechanics |
-| PMC (Buy Update) | $PMC_{new} = \frac{PMC_{old} \cdot Q_{old} + P \cdot Q_{buy}}{Q_{old} + Q_{buy}}$ | Average cost basis tracking |
-| Realized Gain (Sell) | $Gain = (P_{sell} - PMC_{old}) \times Q_{sell}$ | Taxable gain per share × quantity |
-| CAGR | $CAGR = (\frac{Wealth_{end}}{Wealth_0})^{\frac{252}{n\_days}} - 1$ | Annualized growth rate |
-| Volatility (Annual) | $\sigma = \sigma_{daily} \times \sqrt{252}$ | Daily vol annualized to trading year |
-| Max Drawdown | $MD = \min_t (\frac{Wealth_t - HWM_t}{HWM_t})$ | Worst peak-to-trough decline |
-| Sharpe Ratio | $Sharpe = \frac{\mu(r_p - r_f)}{\sigma(r_p - r_f)} \times \sqrt{252}$ | Excess return per unit of risk |
-| Sortino Ratio | $Sortino = \frac{\mu(r_p - r_f)}{\sigma_{down}} \times \sqrt{252}$ | Penalizes downside vol only |
 
 ---
 
@@ -637,15 +584,6 @@ Some dependencies are optional:
 
 ---
 
-## Code Structure & Best Practices
-
-### Design Principles
-
-1. **Modularity**: Each module has a single, well-defined responsibility. Functions are pure (no side effects) where possible.
-2. **Validation**: Input validation occurs at module boundaries; invalid inputs raise descriptive `ValueError` or `TypeError`.
-3. **Vectorization**: NumPy vectorization is used for MC path generation (fast). Portfolio simulation uses explicit loops (correct).
-4. **Reproducibility**: Optional `seed` parameter ensures deterministic runs for debugging and publication.
-5. **Comments**: Critical financial logic includes detailed docstrings and inline comments.
 
 ### Common Workflows
 
@@ -696,144 +634,56 @@ Sharpe Ratio 0.4652   0.5389    0.0087    0.8234
 ...
 ```
 
-**Interpretation**:
-- **Median CAGR of 9.23%**: Half of paths delivered at least 9.23% annualized returns.
-- **P5 CAGR of 0.12%**: In the worst 5% of scenarios, returns barely kept pace with inflation.
-- **Median Max Drawdown of -29.87%**: Half of paths saw their portfolio fall to ~70% of peak value at worst.
-- **Sharpe Ratio 0.54**: Risk-adjusted return of 54 basis points per unit of volatility.
-
-#### Spaghetti Plot
-A chart with 100 overlaid equity curves:
-- **Tight bundle**: Low variance; most paths track closely (e.g., a portfolio of long bonds).
-- **Wide spread**: High variance; outcomes range from strong to poor (e.g., a leveraged equity portfolio in high volatility).
-- **Downward skew**: Many paths end below starting capital (potential ruin scenarios).
-
-#### Probability of Ruin
-```
-Probability of Ruin: 0.023
-```
-**Interpretation**: 2.3% of scenarios saw the portfolio drop below 10% of initial capital. For a $100,000 portfolio, ruin means falling below $10,000.
 
 ---
 
 ## Limitations & Future Enhancements
 
-### Current Limitations
+### Limitations & Future Enhancements
 
-1. **No Hedging**: The simulator does not model options, futures, or inverse ETFs for hedging.
-2. **Zero Transaction Costs**: No bid-ask spreads or execution slippage (can be added).
-3. **No Market Microstructure**: Assumes instant fills; doesn't model liquidity constraints.
-4. **Stationarity Assumption**: Historical mean and covariance are treated as constant (real markets exhibit regime switching).
-5. **Tax Simplifications**: 
-   - Capital losses are not carried forward or used to offset gains.
-   - Taxes are paid immediately in the rebalancing period (not deferred to year-end).
-   - Assumes a single flat tax rate (no progressive brackets or alternative minimum tax).
-6. **Rebalancing Determinism**: Rebalances occur on fixed calendar dates, not dynamically when drift exceeds tolerance.
+The following features are currently **not supported** but represent promising directions for future development:
 
-### Potential Enhancements
+#### Market Structure & Mechanics
+1. **No Hedging** (Limitation): The simulator does not model options, futures, or inverse ETFs for hedging. *Future: Add option overlay strategies and inverse ETF allocations.*
+2. **Zero Transaction Costs** (Limitation): No bid-ask spreads or execution slippage. *Future: Add per-trade cost or percentage slippage.*
+3. **No Market Microstructure** (Limitation): Assumes instant fills; doesn't model liquidity constraints or partial execution. *Future: Simulate realistic order processing and liquidity impact.*
 
-1. **Regime Switching**: Parameterize different market regimes (bull, bear, crisis) with separate mean/covariance.
-2. **Transaction Costs**: Add per-trade cost or percentage slippage.
-3. **Dynamic Rebalancing**: Trigger rebalances when drift exceeds tolerance (not just on calendar dates).
-4. **Tax Loss Harvesting**: Model strategic selling of losers to offset winners.
-5. **Leverage Constraints**: Simulate margin calls or forced liquidation if leverage exceeds broker limits.
-6. **Funding Cost Curves**: Model the term structure of funding costs (not just a single daily rate).
-7. **Hedge Strategies**: Option overlays, put spreads, inverse ETF allocations.
-8. **Forward-Looking Estimation**: Use GARCH or other time-series models for conditional volatility rather than historical averages.
+#### Volatility & Scenario Generation
+4. **Stationarity Assumption** (Limitation): Historical mean and covariance are treated as constant; real markets exhibit regime switching. *Future: Parameterize different market regimes (bull, bear, crisis) with separate mean/covariance.*
+5. **Day-by-Day Bootstrap (No Clustering)** (Limitation): The bootstrap method samples days independently with replacement. Real market volatility exhibits clustering. The simulator does not capture volatility regime persistence. *Future: Implement block bootstrap or regime-switching models.*
+6. **Limited Historical Window** (Limitation): Monte Carlo paths are constrained by the availability of historical data; cannot extrapolate beyond available market history. *Future: Use forward-looking models (GARCH, implied volatility from options) for scenario generation.*
+7. **Forward-Looking Estimation** (Limitation): Uses only historical mean/covariance; no conditional volatility modeling. *Future: Integrate GARCH or other time-series models for dynamic volatility estimates.*
 
----
+#### Portfolio Management
+8. **No Dollar Cost Averaging or Value Averaging** (Limitation): The simulator assumes a single lump-sum initial investment. Periodic contributions (DCA) or dynamic contribution adjustments (value averaging) are not modeled. *Future: Add support for periodic inflows/outflows.*
+9. **No Cash Allocation** (Limitation): The simulator assumes all capital is deployed at all times. A "cash" allocation must be modeled as a separate spot asset (e.g., `SpotAssetConfig(id="CASH", ticker="SHV")`), not as a dedicated cash sleeve. *Future: Add native cash/money-market asset class.*
+10. **Rebalancing Determinism** (Limitation): Rebalances occur on fixed calendar dates, not dynamically when drift exceeds tolerance. *Future: Implement dynamic rebalancing triggered by weight drift or volatility events.*
 
-## Output Files & Directory Structure
+#### Taxation
+11. **Tax Simplifications** (Limitation): 
+    - Capital losses are not carried forward or used to offset gains.
+    - Taxes are paid immediately in the rebalancing period (not deferred to year-end).
+    - Assumes a single flat tax rate (no progressive brackets or alternative minimum tax).
+    
+    *Future: Implement tax loss harvesting, loss carryforward, and multi-bracket tax structures.*
 
-```
-leveraged-etf-pf/
-├── data/                          # Downloaded price/rate data (CSVs)
-│   ├── VTI.csv
-│   ├── BND.csv
-│   ├── FRED_EFFR.csv
-│   └── ...
-├── output/                        # Simulation results
-│   ├── portfolio_metrics_summary.csv  # Aggregated metrics
-│   ├── all-weather/
-│   │   ├── portfolio_metrics_summary.csv
-│   │   └── wealth_paths.csv
-│   ├── classic-60-40/
-│   │   ├── portfolio_metrics_summary.csv
-│   │   └── wealth_paths.csv
-│   └── ...
-├── constants.py                   # Shared constants
-├── data_loader.py                 # Market data ingestion
-├── letf_engine.py                 # LETF return calculation
-├── montecarlo.py                  # Path generation
-├── portfolio_sim.py               # Core simulation engine
-├── metrics.py                     # Risk/return metrics
-├── orchestration.py               # Workflow management
-├── visuals.py                     # Plotting functions
-├── run_portfolio_batch.py         # Batch runner
-├── main.ipynb                     # Main notebook
-├── instructions.ipynb             # Instructions notebook
-├── download_data.ipynb            # Data download notebook
-├── readme.md                      # This file
-└── requirements.txt               # Python dependencies
-```
+#### Leverage & Constraints
+12. **Leverage Constraints** (Limitation / Future): The simulator does not model margin calls, forced liquidation, or broker-imposed leverage limits. *Future: Add margin requirements and forced liquidation triggers.*
+13. **Funding Cost Curves** (Limitation / Future): Uses a single daily funding/borrowing rate; does not model the term structure of funding costs. *Future: Model dynamic term structure and counterparty credit spreads.*
+
+#### Currency & Asset Scope
+14. **USD Only** (Limitation): All prices and rates are assumed to be in USD. Multi-currency portfolios and hedging (e.g., currency forwards) are not supported. *Future: Add multi-currency support.*
+15. **No Multi-Currency Support** (Limitation): The framework does not support positions in multiple currencies or currency hedging strategies. All assets must be priced in the same currency. *Future: Implement currency conversion, FX hedging overlays, and multi-currency correlation matrices.*
 
 ---
 
-## Troubleshooting
 
-### Issue: "yfinance is not installed"
-**Solution**: Install yfinance or use pre-cached CSV files in `data/`.
-```bash
-pip install yfinance
-```
 
-### Issue: "FRED data file not found"
-**Solution**: Run `download_data.ipynb` to fetch FRED data, or manually add CSVs to `data/` folder.
 
-### Issue: "Covariance matrix is not positive semi-definite"
-**Solution**: The simulator adds small diagonal jitter to stabilize Cholesky decomposition. If this persists, check for zero-variance assets or missing data.
 
-### Issue: Portfolio simulation is slow
-**Solution**: This is expected. The simulator iterates path-by-path and day-by-day for exact PMC tracking. 
-- Reduce `n_paths` or `horizon_days` for testing.
-- Use parametric MC (faster than bootstrap).
-- Run on a machine with multiple cores (future: add parallelization).
-
-### Issue: NaN or inf values in metrics
-**Solution**: Check that:
-- Wealth paths are all positive (portfolio never ruined or crashes to zero).
-- Returns contain no NaNs (check data_loader output).
-- Risk-free rate is finite and reasonable.
-
----
-
-## Contributing & Development
-
-### Code Style
-- Follow **PEP 8**. Format with `black` or `autopep8`.
-- Use type hints where helpful.
-- Add docstrings to public functions.
-
-### Testing
-- Unit tests would be valuable for `letf_engine`, `montecarlo`, and `metrics` modules.
-- Integration tests for end-to-end workflows.
-
-### Extending the Simulator
-Common extensions:
-1. Add new metrics (Calmar ratio, Information ratio, etc.).
-2. Support different tax models (FIFO, specific ID, wash-sale rules).
-3. Implement hedging overlays.
-4. Add regime-switching scenarios.
-
----
 
 ## References & Further Reading
 
-### Financial Concepts
-- **Leverage & Volatility Drag**: Arnott & West (2016), "How Can 'Diversified' Leverage and Risk Parity Fail?"
-- **Sharpe & Sortino Ratios**: Sortino & Price (1994), "Performance Measurement in a Downside Risk Framework."
-- **Drawdown Analysis**: Chekhlov et al. (2005), "Drawdown Measure in Portfolio Optimization."
-- **LETF Decay**: Gastineau (2003), "The Benchmark Index ETF Performance Problem."
 
 
 
